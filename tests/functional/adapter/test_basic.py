@@ -61,10 +61,10 @@ seeds:
 """
 
 """
-Since the update operation on seed 'added' is involved in the test case, 
-'added' must be constructed into a transaction table. 
+Since the update operation on seed 'added' is involved in the test case,
+'added' must be constructed into a transaction table.
 
-This does not mean that the 'dbt snapshot' cannot be performed normally on an ordinary table. 
+This does not mean that the 'dbt snapshot' cannot be performed normally on an ordinary table.
 It only matters if the user wants to update or delete operation, the target table must be the transaction table.
 """
 
