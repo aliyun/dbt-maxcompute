@@ -7,8 +7,6 @@ from odps.dbapi import Cursor, Connection
 from odps.errors import ODPSError
 import re
 
-from dbt.adapters.maxcompute.context import GLOBAL_SQL_HINTS
-
 
 class ConnectionWrapper(Connection):
     def cursor(self, *args, **kwargs):
