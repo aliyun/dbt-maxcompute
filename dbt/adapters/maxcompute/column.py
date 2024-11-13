@@ -11,7 +11,7 @@ Self = TypeVar("Self", bound="MaxComputeColumn")
 @dataclass
 class MaxComputeColumn(Column):
     table_column: TableSchema.TableColumn = None
-    comment: str = None
+    comment: str = ""
 
     TYPE_LABELS = {
         "TEXT": "STRING",
@@ -41,7 +41,7 @@ class MaxComputeColumn(Column):
     def string_type(cls, size: int) -> str:
         return "string"
 
-    def can_expand_to(self: Self, other_column: Self) -> bool:  # type: ignore
+    def can_expand_to(self: Self, other_column: Self) -> bool:
         """returns True if both columns are strings"""
         return self.is_string() and other_column.is_string()
 

@@ -51,7 +51,7 @@ repos:
         -   --pretty
         -   --show-error-codes
         -   --warn-unused-ignores
-        files: ^dbt/adapters/bigquery
+        files: ^dbt/adapters/maxcompute
         additional_dependencies:
         -   types-protobuf
         -   types-pytz

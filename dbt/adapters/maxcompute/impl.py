@@ -333,7 +333,7 @@ class MaxComputeAdapter(SQLAdapter):
                 column_index += 1
 
         table_instance = Table(sql_rows, column_names=sql_column_names)
-        results = self._catalog_filter_table(table_instance, used_schemas)  # type: ignore[arg-type]
+        results = self._catalog_filter_table(table_instance, used_schemas)
         return results
 
     # MaxCompute does not support transactions
