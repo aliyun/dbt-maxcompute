@@ -77,9 +77,7 @@ class MaxComputeInformationSchema(InformationSchema):
     quote_character: str = "`"
 
     @classmethod
-    def get_path(
-        cls, relation: BaseRelation, information_schema_view: Optional[str]
-    ) -> Path:
+    def get_path(cls, relation: BaseRelation, information_schema_view: Optional[str]) -> Path:
         return Path(
             database="SYSTEM_CATALOG",
             schema="INFORMATION_SCHEMA",
@@ -88,9 +86,7 @@ class MaxComputeInformationSchema(InformationSchema):
 
     @classmethod
     def get_include_policy(cls, relation, information_schema_view):
-        return relation.include_policy.replace(
-            database=True, schema=True, identifier=True
-        )
+        return relation.include_policy.replace(database=True, schema=True, identifier=True)
 
     @classmethod
     def get_quote_policy(
@@ -98,6 +94,4 @@ class MaxComputeInformationSchema(InformationSchema):
         relation,
         information_schema_view: Optional[str],
     ) -> Policy:
-        return relation.quote_policy.replace(
-            database=False, schema=False, identifier=False
-        )
+        return relation.quote_policy.replace(database=False, schema=False, identifier=False)

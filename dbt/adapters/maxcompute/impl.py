@@ -67,12 +67,8 @@ class MaxComputeAdapter(SQLAdapter):
 
     _capabilities: CapabilityDict = CapabilityDict(
         {
-            Capability.TableLastModifiedMetadata: CapabilitySupport(
-                support=Support.Full
-            ),
-            Capability.SchemaMetadataByRelations: CapabilitySupport(
-                support=Support.Full
-            ),
+            Capability.TableLastModifiedMetadata: CapabilitySupport(support=Support.Full),
+            Capability.SchemaMetadataByRelations: CapabilitySupport(support=Support.Full),
         }
     )
 
@@ -132,9 +128,7 @@ class MaxComputeAdapter(SQLAdapter):
         # from_relation type maybe wrong, here is a workaround.
         table = self.get_odps_table_by_relation(relation, 3)
         if table is None:
-            raise DbtRuntimeError(
-                f"Table {relation.render()} does not exist, cannot truncate"
-            )
+            raise DbtRuntimeError(f"Table {relation.render()} does not exist, cannot truncate")
         relation = MaxComputeRelation.from_odps_table(table)
         # use macro to truncate
         super().truncate_relation(relation)
@@ -236,9 +230,7 @@ class MaxComputeAdapter(SQLAdapter):
                         break
                     except NoSuchObject:
                         if i == 2:
-                            logger.debug(
-                                f"Table {table.name} does not exist, skip it."
-                            )
+                            logger.debug(f"Table {table.name} does not exist, skip it.")
                         else:
                             time.sleep(5)
             return relations
@@ -270,9 +262,7 @@ class MaxComputeAdapter(SQLAdapter):
         schema = schema.strip("`")
         time.sleep(10)
         schema_exist = self.get_odps_client().exist_schema(schema, database)
-        logger.debug(
-            f"check_schema_exists: {database}.{schema}, answer is {schema_exist}"
-        )
+        logger.debug(f"check_schema_exists: {database}.{schema}, answer is {schema_exist}")
         return schema_exist
 
     def _get_one_catalog(
@@ -287,9 +277,7 @@ class MaxComputeAdapter(SQLAdapter):
             for odps_table in results:
                 relation = MaxComputeRelation.from_odps_table(odps_table)
                 relations.append(relation)
-        return self._get_one_catalog_by_relations(
-            information_schema, relations, used_schemas
-        )
+        return self._get_one_catalog_by_relations(information_schema, relations, used_schemas)
 
     def _get_one_catalog_by_relations(
         self,
@@ -388,9 +376,7 @@ class MaxComputeAdapter(SQLAdapter):
         ]
         return columns
 
-    def timestamp_add_sql(
-        self, add_to: str, number: int = 1, interval: str = "hour"
-    ) -> str:
+    def timestamp_add_sql(self, add_to: str, number: int = 1, interval: str = "hour") -> str:
         return f"dateadd({add_to}, {number}, '{interval}')"
 
     def string_add_sql(

@@ -14,10 +14,12 @@ pytest-logbook~=1.2
 pytest-xdist~=3.6
 tox~=4.11
 
+
 # build
 bumpversion~=0.6.0
 twine~=5.1
 wheel~=0.43
+
 
 # maxcompute
 pandas~=2.2.3
