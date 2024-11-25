@@ -351,7 +351,8 @@ class MaxComputeAdapter(SQLAdapter):
 
     @classmethod
     def convert_number_type(cls, agate_table: "agate.Table", col_idx: int) -> str:
-        return "decimal"
+        decimals = agate_table.aggregate(agate.MaxPrecision(col_idx))  # type: ignore[attr-defined]
+        return "decimal" if decimals else "bigint"
 
     @classmethod
     def convert_integer_type(cls, agate_table: "agate.Table", col_idx: int) -> str:
@@ -418,7 +419,6 @@ class MaxComputeAdapter(SQLAdapter):
             if isinstance(column_type, agate.data_types.date_time.DateTime):
                 timestamp_columns.append(agate_table.column_names[i])
 
-        print(timestamp_columns)
 
         pd_dataframe = pd.read_csv(
             file_path, delimiter=field_delimiter, parse_dates=timestamp_columns

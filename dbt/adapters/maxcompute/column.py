@@ -14,7 +14,10 @@ class MaxComputeColumn(Column):
     comment: str = ""
 
     TYPE_LABELS = {
-        "TEXT": "string",
+        "TEXT": "STRING",
+        "INTEGER": "INT",
+        "BOOL": "BOOLEAN",
+        "NUMERIC": "DECIMAL"
     }
 
     @property
@@ -26,9 +29,7 @@ class MaxComputeColumn(Column):
 
     @classmethod
     def numeric_type(cls, dtype: str, precision: Any, scale: Any) -> str:
-        # MaxCompute makes life much harder if precision + scale are specified
-        # even if they're fed in here, just return the data type by itself
-        return dtype
+        return "DECIMAL({}, {})".format(precision, scale)
 
     def is_string(self) -> bool:
         return self.dtype.lower() in [
