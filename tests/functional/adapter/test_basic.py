@@ -14,6 +14,9 @@ from dbt.tests.adapter.basic.test_snapshot_timestamp import BaseSnapshotTimestam
 from dbt.tests.adapter.basic.test_adapter_methods import BaseAdapterMethod
 
 # additional basic tests
+from dbt.tests.adapter.basic.test_docs_generate import (
+    BaseDocsGenerate, BaseDocsGenReferences
+)
 from dbt.tests.adapter.basic.test_table_materialization import BaseTableMaterialization
 from dbt.tests.adapter.basic.test_validate_connection import BaseValidateConnection
 
@@ -96,6 +99,42 @@ class TestBaseAdapterMethodMaxCompute(BaseAdapterMethod):
     (the created View cannot be seen in a short period of time, which is not as expected)
     Therefore, the error reported by this UT does not mean that the function of the adapter is incomplete.
     """
+
+
+class TestDocsGenerateMaxCompute(BaseDocsGenerate):
+    @pytest.fixture(scope="class")
+    def expected_catalog(self, project, profile_user):
+        from dbt.tests.adapter.basic import expected_catalog
+
+        return expected_catalog.base_expected_catalog(
+            project,
+            role=profile_user,
+            id_type="decimal(38,18)",
+            text_type="string",
+            time_type="timestamp",
+            view_type="VIEW",
+            table_type="TABLE",
+            model_stats=expected_catalog.no_stats(),
+        )
+    pass
+
+
+class TestDocsGenReferencesMaxCompute(BaseDocsGenReferences):
+    @pytest.fixture(scope="class")
+    def expected_catalog(self, project, profile_user):
+        from dbt.tests.adapter.basic import expected_catalog
+        return expected_catalog.expected_references_catalog(
+            project,
+            role=profile_user,
+            id_type="decimal(38,18)",
+            text_type="string",
+            time_type="timestamp",
+            bigint_type="bigint",
+            view_type="VIEW",
+            table_type="TABLE",
+            model_stats=expected_catalog.no_stats(),
+        )
+    pass
 
 
 class TestTableMaterializationMaxCompute(BaseTableMaterialization):

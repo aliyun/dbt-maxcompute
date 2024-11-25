@@ -302,18 +302,21 @@ class MaxComputeAdapter(SQLAdapter):
         sql_rows = []
 
         for relation in relations:
-            odps_table = self.get_odps_table_by_relation(relation)
+            odps_table = self.get_odps_table_by_relation(relation, 10)
             table_database = relation.project
             table_schema = relation.schema
             table_name = relation.table
 
-            if odps_table or odps_table.is_materialized_view:
+            if not odps_table:
+                continue
+
+            if odps_table.is_virtual_view or odps_table.is_materialized_view:
                 table_type = "VIEW"
             else:
                 table_type = "TABLE"
             table_comment = odps_table.comment
             table_owner = odps_table.owner
-            column_index = 0
+            column_index = 1
             for column in odps_table.table_schema.simple_columns:
                 column_name = column.name
                 column_type = column.type.name
