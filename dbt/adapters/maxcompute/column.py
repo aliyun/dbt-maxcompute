@@ -17,7 +17,8 @@ class MaxComputeColumn(Column):
         "TEXT": "STRING",
         "INTEGER": "INT",
         "BOOL": "BOOLEAN",
-        "NUMERIC": "DECIMAL"
+        "NUMERIC": "DECIMAL",
+        "REAL": "FLOAT",
     }
 
     @property
@@ -32,12 +33,43 @@ class MaxComputeColumn(Column):
         return "DECIMAL({}, {})".format(precision, scale)
 
     def is_string(self) -> bool:
-        return self.dtype.lower() in [
-            "string" "text",
+        lower = self.dtype.lower()
+        if lower.startswith("char") or lower.startswith("varchar"):
+            return True
+        return lower in [
+            "string",
+            "text",
             "character varying",
             "character",
-            "char" "varchar",
+            "char",
+            "varchar",
         ]
+
+    def is_integer(self) -> bool:
+        return self.dtype.lower() in [
+            # real types
+            "tinyint",
+            "smallint",
+            "integer",
+            "bigint",
+            "smallserial",
+            "serial",
+            "bigserial",
+            # aliases
+            "int",
+            "int2",
+            "int4",
+            "int8",
+            "serial2",
+            "serial4",
+            "serial8",
+        ]
+
+    def is_numeric(self) -> bool:
+        lower = self.dtype.lower()
+        if lower.startswith("decimal") or lower.startswith("numeric"):
+            return True
+        return lower in ["numeric", "decimal"]
 
     def string_type(cls, size: int) -> str:
         return "string"
