@@ -16,8 +16,6 @@ class TestMicrobatchMaxCompute(BaseMicrobatch):
     pass
 
 
-@pytest.mark.skip(
-    reason="This test is OK, but need execute 'setproject odps.schema.evolution.enable=true;'")
 class TestIncrementalOnSchemaChange(BaseIncrementalOnSchemaChange):
     pass
 

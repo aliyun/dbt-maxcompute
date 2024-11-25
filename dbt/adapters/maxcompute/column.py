@@ -71,7 +71,7 @@ class MaxComputeColumn(Column):
             return True
         return lower in ["numeric", "decimal"]
 
-    def string_type(cls, size: int) -> str:
+    def string_type(cls, size: int = 0) -> str:
         return "string"
 
     def can_expand_to(self: Self, other_column: Self) -> bool:
