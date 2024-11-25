@@ -23,6 +23,7 @@ from dbt.adapters.sql import SQLAdapter
 from dbt_common.contracts.constraints import ConstraintType
 from dbt_common.exceptions import DbtRuntimeError
 from dbt_common.utils import AttrDict
+from odps import ODPS
 from odps.errors import ODPSError, NoSuchObject
 
 from dbt.adapters.maxcompute import MaxComputeConnectionManager
@@ -77,7 +78,7 @@ class MaxComputeAdapter(SQLAdapter):
         super().__init__(config, mp_context)
         self.connections: MaxComputeConnectionManager = self.connections
 
-    def get_odps_client(self):
+    def get_odps_client(self) -> ODPS:
         conn = self.connections.get_thread_connection()
         return conn.handle.odps
 
@@ -109,6 +110,14 @@ class MaxComputeAdapter(SQLAdapter):
     ###
     # Implementations of abstract methods
     ###
+    def get_relation(self, database: str, schema: str, identifier: str) -> Optional[MaxComputeRelation]:
+        odpsTable = self.get_odps_client().get_table(identifier, database, schema)
+        try:
+            odpsTable.reload()
+        except NoSuchObject:
+            return None
+        return MaxComputeRelation.from_odps_table(odpsTable)
+
     @classmethod
     def date_function(cls) -> str:
         return "current_timestamp()"
@@ -121,6 +130,8 @@ class MaxComputeAdapter(SQLAdapter):
         is_cached = self._schema_is_cached(relation.database, relation.schema)
         if is_cached:
             self.cache_dropped(relation)
+        if relation.table is None:
+            return
         self.get_odps_client().delete_table(
             relation.identifier, relation.project, True, relation.schema
         )
@@ -177,7 +188,8 @@ class MaxComputeAdapter(SQLAdapter):
             kwargs=kwargs,
             needs_conn=needs_conn,
         )
-        self.connections.execute(str(sql))
+        if sql is not None and str(sql).strip() != "None":
+            self.connections.execute(str(sql))
         return sql
 
     def create_schema(self, relation: MaxComputeRelation) -> None:
@@ -196,7 +208,7 @@ class MaxComputeAdapter(SQLAdapter):
                 raise e
 
     def drop_schema(self, relation: MaxComputeRelation) -> None:
-        logger.debug(f"drop_schema: '{relation.project}.{relation.schema}'")
+        logger.debug(f"drop_schema: '{relation.database}.{relation.schema}'")
 
         # Although the odps client has a check schema exist method, it will have a considerable delay,
         # so that it is impossible to judge how many seconds it should wait.
