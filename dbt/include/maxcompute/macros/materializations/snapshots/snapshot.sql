@@ -21,7 +21,7 @@
     {% set select = snapshot_staging_table(strategy, sql, target_relation) %}
 
     {% call statement('build_snapshot_staging_relation') %}
-        {{ create_transactional_table_as(True, temp_relation, select) }}
+        {{ create_table_as_internal(True, temp_relation, select, True) }}
     {% endcall %}
 
     {% do return(temp_relation) %}
@@ -109,7 +109,7 @@
 
       {% set build_sql = build_snapshot_table(strategy, model['compiled_code']) %}
       {% set build_or_select_sql = build_sql %}
-      {% set final_sql = create_transactional_table_as(False, target_relation, build_sql) %}
+      {% set final_sql = create_table_as_internal(False, target_relation, build_sql, True) %}
 
   {% else %}
 

@@ -19,6 +19,8 @@ class ConnectionWrapper(Connection):
             **kwargs,
         )
 
+    def cancel(self):
+        self.close()
 
 logger = AdapterLogger("MaxCompute")
 

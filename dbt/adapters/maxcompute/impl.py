@@ -62,8 +62,8 @@ class MaxComputeAdapter(SQLAdapter):
     CONSTRAINT_SUPPORT = {
         ConstraintType.check: ConstraintSupport.NOT_SUPPORTED,
         ConstraintType.not_null: ConstraintSupport.ENFORCED,
-        ConstraintType.unique: ConstraintSupport.NOT_ENFORCED,
-        ConstraintType.primary_key: ConstraintSupport.NOT_ENFORCED,
+        ConstraintType.unique: ConstraintSupport.NOT_SUPPORTED,
+        ConstraintType.primary_key: ConstraintSupport.NOT_SUPPORTED,
         ConstraintType.foreign_key: ConstraintSupport.NOT_SUPPORTED,
     }
 
@@ -410,8 +410,15 @@ class MaxComputeAdapter(SQLAdapter):
             raise DbtRuntimeError(f'Got an unexpected location value of "{location}"')
 
     def validate_sql(self, sql: str) -> AdapterResponse:
-        res = self.connections.execute(sql)
+        validate_sql = "explain " + sql
+        res = self.connections.execute(validate_sql)
         return res[0]
+
+    def valid_incremental_strategies(self):
+        """The set of standard builtin strategies which this adapter supports out-of-the-box.
+        Not used to validate custom strategies defined by end users.
+        """
+        return ["append", "merge", "delete+insert"]
 
     @available.parse_none
     def load_dataframe(
@@ -435,12 +442,19 @@ class MaxComputeAdapter(SQLAdapter):
         pd_dataframe = pd.read_csv(
             file_path, delimiter=field_delimiter, parse_dates=timestamp_columns
         )
-
-        self.get_odps_client().write_table(
-            table_name,
-            pd_dataframe,
-            project=database,
-            schema=schema,
-            create_table=False,
-            create_partition=False,
-        )
+        # make sure target table exist
+        for i in range(10):
+            try:
+                self.get_odps_client().write_table(
+                    table_name,
+                    pd_dataframe,
+                    project=database,
+                    schema=schema,
+                    create_table=False,
+                    create_partition=False,
+                )
+                break
+            except NoSuchObject:
+                logger.info(f"Table {database}.{schema}.{table_name} does not exist, retrying...")
+                time.sleep(10)
+                continue
