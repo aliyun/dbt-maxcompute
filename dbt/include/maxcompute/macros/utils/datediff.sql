@@ -1,6 +1,7 @@
 
 
 {% macro maxcompute__datediff(first_date, second_date, datepart) %}
+    {% set datepart = datepart.lower() %}
 
     {%- if datepart == 'day' -%}
 

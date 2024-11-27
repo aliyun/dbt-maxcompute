@@ -1,4 +1,5 @@
 {%- macro maxcompute_last_day(date, datepart) -%}
+    {% set datepart = datepart.lower() %}
     {%- if datepart == 'quarter' -%}
         {{ exceptions.raise_compiler_error("macro last_day not support for datepart ~ '" ~ datepart ~ "'") }}
     {%- else -%}

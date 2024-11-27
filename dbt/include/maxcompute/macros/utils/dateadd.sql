@@ -1,4 +1,5 @@
 {% macro maxcompute__dateadd(datepart, interval, from_date_or_timestamp) %}
+    {% set datepart = datepart.lower() %}
     {%- if datepart in ['day', 'month', 'year', 'hour'] %}
        dateadd({{ from_date_or_timestamp }}, {{ interval }}, '{{ datepart }}')
     {%- elif datepart == 'quarter' -%}

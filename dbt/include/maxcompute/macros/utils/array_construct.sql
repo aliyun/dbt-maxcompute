@@ -1,4 +1,5 @@
 {% macro maxcompute__array_construct(inputs, data_type) -%}
+    {% set data_type = data_type.lower() %}
     {%- if inputs|length > 0 -%}
        {%- if data_type == 'string' -%}
           array({{ '\"' + inputs|join('\", \"') + '\"' }})
