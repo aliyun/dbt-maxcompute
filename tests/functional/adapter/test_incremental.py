@@ -1,8 +1,12 @@
 import pytest
 from dbt.tests.adapter.incremental.test_incremental_unique_id import BaseIncrementalUniqueKey
-from dbt.tests.adapter.incremental.test_incremental_merge_exclude_columns import BaseMergeExcludeColumns
+from dbt.tests.adapter.incremental.test_incremental_merge_exclude_columns import (
+    BaseMergeExcludeColumns,
+)
 from dbt.tests.adapter.incremental.test_incremental_predicates import BaseIncrementalPredicates
-from dbt.tests.adapter.incremental.test_incremental_on_schema_change import BaseIncrementalOnSchemaChange
+from dbt.tests.adapter.incremental.test_incremental_on_schema_change import (
+    BaseIncrementalOnSchemaChange,
+)
 from dbt.tests.adapter.incremental.test_incremental_microbatch import BaseMicrobatch
 
 
@@ -21,6 +25,7 @@ class TestIncrementalOnSchemaChange(BaseIncrementalOnSchemaChange):
 
 class TestIncrementalPredicatesDeleteInsert(BaseIncrementalPredicates):
     pass
+
 
 class TestPredicatesDeleteInsert(BaseIncrementalPredicates):
     @pytest.fixture(scope="class")
@@ -106,7 +111,9 @@ select 'PA','Philadelphia','Philadelphia',DATE'2021-05-21'
 """
 
 
-@pytest.mark.skip(reason="The function is ok, but it cannot run successfully due to some reasons on the server side.")
+@pytest.mark.skip(
+    reason="The function is ok, but it cannot run successfully due to some reasons on the server side."
+)
 class TestIncrementalUniqueKey(BaseIncrementalUniqueKey):
 
     @pytest.fixture(scope="class")
@@ -123,6 +130,7 @@ class TestIncrementalUniqueKey(BaseIncrementalUniqueKey):
             models__nontyped_trinary_unique_key_list_sql,
             models__unary_unique_key_list_sql,
         )
+
         return {
             "trinary_unique_key_list.sql": models__trinary_unique_key_list_sql,
             "nontyped_trinary_unique_key_list.sql": models__nontyped_trinary_unique_key_list_sql,
@@ -139,12 +147,15 @@ class TestIncrementalUniqueKey(BaseIncrementalUniqueKey):
                 "unique_key_list__inplace_overwrite.sql": models__expected__unique_key_list__inplace_overwrite_sql,
             },
         }
+
     @pytest.fixture(scope="class")
     def seeds(self):
         from dbt.tests.adapter.incremental.test_incremental_unique_id import seeds__seed_csv
+
         return {
             "duplicate_insert.sql": seeds__duplicate_insert_sql,
             "seed.csv": seeds__seed_csv,
             "add_new_rows.sql": seeds__add_new_rows_sql,
         }
+
     pass

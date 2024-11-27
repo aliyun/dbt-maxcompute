@@ -37,6 +37,7 @@ sources:
         identifier: "{{ var('seed_name', 'base') }}"
 """
 
+
 class BaseTestDeltaTable:
 
     @pytest.fixture(scope="class")

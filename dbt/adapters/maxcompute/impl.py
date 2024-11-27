@@ -110,7 +110,9 @@ class MaxComputeAdapter(SQLAdapter):
     ###
     # Implementations of abstract methods
     ###
-    def get_relation(self, database: str, schema: str, identifier: str) -> Optional[MaxComputeRelation]:
+    def get_relation(
+        self, database: str, schema: str, identifier: str
+    ) -> Optional[MaxComputeRelation]:
         odpsTable = self.get_odps_client().get_table(identifier, database, schema)
         try:
             odpsTable.reload()
@@ -363,7 +365,7 @@ class MaxComputeAdapter(SQLAdapter):
 
     @classmethod
     def convert_number_type(cls, agate_table: "agate.Table", col_idx: int) -> str:
-        decimals = agate_table.aggregate(agate.MaxPrecision(col_idx))  # type: ignore[attr-defined]
+        decimals = agate_table.aggregate(agate.MaxPrecision(col_idx))
         return "decimal" if decimals else "bigint"
 
     @classmethod
@@ -437,7 +439,6 @@ class MaxComputeAdapter(SQLAdapter):
         for i, column_type in enumerate(agate_table.column_types):
             if isinstance(column_type, agate.data_types.date_time.DateTime):
                 timestamp_columns.append(agate_table.column_names[i])
-
 
         pd_dataframe = pd.read_csv(
             file_path, delimiter=field_delimiter, parse_dates=timestamp_columns

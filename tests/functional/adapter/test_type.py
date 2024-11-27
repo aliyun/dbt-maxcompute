@@ -30,9 +30,11 @@ class TestTypeFloat(BaseTypeFloat):
     @pytest.fixture(scope="class")
     def models(self):
         from dbt.tests.adapter.utils.data_types.test_type_float import models__actual_sql
-        return {"actual.sql": self.interpolate_macro_namespace(models__actual_sql, "type_float"),
-                "schema.yml": schema_seed_float__yml
-                }
+
+        return {
+            "actual.sql": self.interpolate_macro_namespace(models__actual_sql, "type_float"),
+            "schema.yml": schema_seed_float__yml,
+        }
 
     pass
 
@@ -51,9 +53,11 @@ class TestTypeInt(BaseTypeInt):
     @pytest.fixture(scope="class")
     def models(self):
         from dbt.tests.adapter.utils.data_types.test_type_int import models__actual_sql
-        return {"actual.sql": self.interpolate_macro_namespace(models__actual_sql, "type_int"),
-                "schema.yml": schema_seed_int__yml
-                }
+
+        return {
+            "actual.sql": self.interpolate_macro_namespace(models__actual_sql, "type_int"),
+            "schema.yml": schema_seed_int__yml,
+        }
 
     pass
 
@@ -74,10 +78,8 @@ class TestTypeNumeric(BaseTypeNumeric):
     @pytest.fixture(scope="class")
     def seeds(self):
         from dbt.tests.adapter.utils.data_types.test_type_numeric import seeds__expected_csv
-        return {
-            "expected.csv": seeds__expected_csv,
-            "schema.yml": schema_seed_numeric__yml
-        }
+
+        return {"expected.csv": seeds__expected_csv, "schema.yml": schema_seed_numeric__yml}
 
     pass
 

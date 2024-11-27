@@ -16,6 +16,7 @@ from dbt.tests.adapter.constraints.test_constraints import (
     BaseIncrementalForeignKeyConstraint,
 )
 
+
 class TestTableConstraintsColumnsEqual(BaseTableConstraintsColumnsEqual):
     @pytest.fixture
     def string_type(self):
@@ -35,7 +36,9 @@ class TestTableConstraintsColumnsEqual(BaseTableConstraintsColumnsEqual):
             ["timestamp'2013-11-03 00:00:00.07'", "timestamp", "timestamp"],
             ["1BD", "decimal(1,0)", "decimal(1,0)"],
         ]
+
     pass
+
 
 class TestViewConstraintsColumnsEqual(BaseViewConstraintsColumnsEqual):
     @pytest.fixture
@@ -56,6 +59,7 @@ class TestViewConstraintsColumnsEqual(BaseViewConstraintsColumnsEqual):
             ["timestamp'2013-11-03 00:00:00.07'", "timestamp", "timestamp"],
             ["1BD", "decimal(1,0)", "decimal(1,0)"],
         ]
+
     pass
 
 
@@ -78,6 +82,7 @@ class TestIncrementalConstraintsColumnsEqual(BaseIncrementalConstraintsColumnsEq
             ["timestamp'2013-11-03 00:00:00.07'", "timestamp", "timestamp"],
             ["1BD", "decimal(1,0)", "decimal(1,0)"],
         ]
+
     pass
 
 
@@ -89,13 +94,15 @@ class TestTableConstraintsRuntimeDdlEnforcement(BaseConstraintsRuntimeDdlEnforce
     However, dbt-maxcompute is not-support for all the tested constraints.
     This test is meaningless.
     """
+
     pass
 
 
 class TestTableConstraintsRollback(BaseConstraintsRollback):
     @pytest.fixture(scope="class")
     def expected_error_messages(self):
-        return ['Can\'t insert a null value into not-null column']
+        return ["Can't insert a null value into not-null column"]
+
     pass
 
 
@@ -109,7 +116,8 @@ class TestIncrementalConstraintsRuntimeDdlEnforcement(
 class TestIncrementalConstraintsRollback(BaseIncrementalConstraintsRollback):
     @pytest.fixture(scope="class")
     def expected_error_messages(self):
-        return ['Can\'t insert a null value into not-null column']
+        return ["Can't insert a null value into not-null column"]
+
     pass
 
 

@@ -22,6 +22,7 @@ class ConnectionWrapper(Connection):
     def cancel(self):
         self.close()
 
+
 logger = AdapterLogger("MaxCompute")
 
 

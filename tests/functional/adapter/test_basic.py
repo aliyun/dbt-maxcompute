@@ -14,9 +14,7 @@ from dbt.tests.adapter.basic.test_snapshot_timestamp import BaseSnapshotTimestam
 from dbt.tests.adapter.basic.test_adapter_methods import BaseAdapterMethod
 
 # additional basic tests
-from dbt.tests.adapter.basic.test_docs_generate import (
-    BaseDocsGenerate, BaseDocsGenReferences
-)
+from dbt.tests.adapter.basic.test_docs_generate import BaseDocsGenerate, BaseDocsGenReferences
 from dbt.tests.adapter.basic.test_table_materialization import BaseTableMaterialization
 from dbt.tests.adapter.basic.test_validate_connection import BaseValidateConnection
 
@@ -116,6 +114,7 @@ class TestDocsGenerateMaxCompute(BaseDocsGenerate):
             table_type="TABLE",
             model_stats=expected_catalog.no_stats(),
         )
+
     pass
 
 
@@ -123,6 +122,7 @@ class TestDocsGenReferencesMaxCompute(BaseDocsGenReferences):
     @pytest.fixture(scope="class")
     def expected_catalog(self, project, profile_user):
         from dbt.tests.adapter.basic import expected_catalog
+
         return expected_catalog.expected_references_catalog(
             project,
             role=profile_user,
@@ -134,6 +134,7 @@ class TestDocsGenReferencesMaxCompute(BaseDocsGenReferences):
             table_type="TABLE",
             model_stats=expected_catalog.no_stats(),
         )
+
     pass
 
 
