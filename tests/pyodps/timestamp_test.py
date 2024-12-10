@@ -5,11 +5,11 @@ import yaml
 from odps import ODPS, options
 import pandas as pd
 
-seeds__data_datediff_csv = """string_text,length_expression,output
-abcdef,3,def
-fishtown,4,town
-december,5,ember
-december,0,
+seeds__data_datediff_csv = """string_text,length_expression,output,timestamp_ntz
+abcdef,3,def,1981-05-20T06:46:51
+fishtown,4,town,1981-05-20T06:46:51
+december,5,ember,1981-05-20T06:46:51
+december,0,,1981-05-20T06:46:51
 """
 
 
@@ -22,7 +22,7 @@ class TestTimestamp(object):
         print(pd_dataframe)
 
         o.write_table(
-            "data_right", pd_dataframe, create_table=False, create_partition=False, lifecycle=1
+            "timestamp_ntz_test", pd_dataframe, create_table=False, create_partition=False, lifecycle=1
         )
         # AttributeError: 'pyarrow.lib.DataType' object has no attribute 'tz'
 

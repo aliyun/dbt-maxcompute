@@ -7,6 +7,7 @@
     {%- set update_columns = get_merge_update_columns(merge_update_columns, merge_exclude_columns, dest_columns) -%}
     {%- set sql_header = config.get('sql_header', none) -%}
 
+    {{ sql_header if sql_header is not none }}
     {% if unique_key %}
         {% if unique_key is sequence and unique_key is not mapping and unique_key is not string %}
             {% for key in unique_key %}
@@ -21,35 +22,33 @@
             {% endset %}
             {% do predicates.append(unique_key_match) %}
         {% endif %}
+
+        merge into {{ target }} as DBT_INTERNAL_DEST
+            using {{ source }} as DBT_INTERNAL_SOURCE
+            on {{"(" ~ predicates | join(") and (") ~ ")"}}
+
+        when matched then update set
+            {% for column_name in update_columns -%}
+                DBT_INTERNAL_DEST.{{ column_name }} = DBT_INTERNAL_SOURCE.{{ column_name }}
+                {%- if not loop.last %}, {%- endif %}
+            {%- endfor %}
+
+        when not matched then insert
+            ({{ dest_cols_csv }})
+        values (
+        {% for column in dest_cols_names %}
+            DBT_INTERNAL_SOURCE.{{ column }} {{- ',' if not loop.last -}}
+        {% endfor %});
+
     {% else %}
-        {% do predicates.append('FALSE') %}
+        INSERT INTO {{ target }} ({{ dest_cols_csv }})
+        SELECT {{ dest_cols_csv }}
+        FROM {{ source }}
     {% endif %}
-
-    {{ sql_header if sql_header is not none }}
-
-    merge into {{ target }} as DBT_INTERNAL_DEST
-        using {{ source }} as DBT_INTERNAL_SOURCE
-        on {{"(" ~ predicates | join(") and (") ~ ")"}}
-
-    {% if unique_key %}
-    when matched then update set
-        {% for column_name in update_columns -%}
-            DBT_INTERNAL_DEST.{{ column_name }} = DBT_INTERNAL_SOURCE.{{ column_name }}
-            {%- if not loop.last %}, {%- endif %}
-        {%- endfor %}
-    {% endif %}
-
-    when not matched then insert
-        ({{ dest_cols_csv }})
-    values (
-    {% for column in dest_cols_names %}
-        DBT_INTERNAL_SOURCE.{{ column }} {{- ',' if not loop.last -}}
-    {% endfor %});
-
 {% endmacro %}
 
 
-{% macro default__get_delete_insert_merge_sql(target, source, unique_key, dest_columns, incremental_predicates) -%}
+{% macro maxcompute__get_delete_insert_merge_sql(target, source, unique_key, dest_columns, incremental_predicates) -%}
 
     {%- set dest_cols_csv = get_quoted_csv(dest_columns | map(attribute="name")) -%}
 
@@ -89,13 +88,8 @@
         select {{ dest_cols_csv }}
         from {{ source }}
     )
-
 {%- endmacro %}
 
-
-{% macro get_insert_overwrite_merge_sql(target, source, dest_columns, predicates, include_sql_header=false) -%}
-  {{ adapter.dispatch('get_insert_overwrite_merge_sql', 'dbt')(target, source, dest_columns, predicates, include_sql_header) }}
-{%- endmacro %}
 
 {% macro maxcompute__get_insert_overwrite_merge_sql(target, source, dest_columns, predicates, include_sql_header) -%}
     {#-- The only time include_sql_header is True: --#}
@@ -109,18 +103,16 @@
 
     {{ sql_header if sql_header is not none and include_sql_header }}
 
-    merge into {{ target }} as DBT_INTERNAL_DEST
-        using {{ source }} as DBT_INTERNAL_SOURCE
-        on FALSE
+    {% call statement("main") %}
+    {% if predicates %}
+    DELETE FROM {{ target }} where True
+      AND {{ predicates | join(' AND ') }};
+    {% else %}
+    TRUNCATE TABLE {{ target }};
+    {% endif %}
+    {% endcall %}
 
-    when not matched by source
-        {% if predicates %} and {{ predicates | join(' and ') }} {% endif %}
-        then delete
-
-    when not matched then insert
-        ({{ dest_cols_csv }})
-    values (
-    {% for column in dest_cols_names %}
-        DBT_INTERNAL_SOURCE.{{ column }} {{- ',' if not loop.last -}}
-    {% endfor %});
+    INSERT INTO {{ target }} ({{ dest_cols_csv }})
+    SELECT {{ dest_cols_csv }}
+    FROM {{ source }}
 {% endmacro %}

@@ -31,6 +31,7 @@ from dbt.adapters.maxcompute.column import MaxComputeColumn
 from dbt.adapters.maxcompute.relation import MaxComputeRelation
 from dbt.adapters.events.logging import AdapterLogger
 
+from dbt.adapters.maxcompute.relation_configs._partition import PartitionConfig
 from dbt.adapters.maxcompute.utils import is_schema_not_found
 
 logger = AdapterLogger("MaxCompute")
@@ -421,7 +422,7 @@ class MaxComputeAdapter(SQLAdapter):
         """The set of standard builtin strategies which this adapter supports out-of-the-box.
         Not used to validate custom strategies defined by end users.
         """
-        return ["append", "merge", "delete+insert"]
+        return ["append", "merge", "delete+insert", "insert_overwrite"]
 
     @available.parse_none
     def load_dataframe(
@@ -515,3 +516,7 @@ class MaxComputeAdapter(SQLAdapter):
 
         logger.debug(f"Normalized dict: {normalized_dict}")
         return normalized_dict
+
+    @available
+    def parse_partition_by(self, raw_partition_by: Any) -> Optional[PartitionConfig]:
+        return PartitionConfig.parse(raw_partition_by)

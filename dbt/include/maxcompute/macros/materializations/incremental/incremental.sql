@@ -1,5 +1,12 @@
 
 {% materialization incremental,  adapter='maxcompute' -%}
+  {%- set raw_partition_by = config.get('partition_by', none) -%}
+  {%- set partition_by = adapter.parse_partition_by(raw_partition_by) -%}
+  -- Not support yet
+  {%- set partitions = config.get('partitions', none) -%}
+  {%- set cluster_by = config.get('cluster_by', none) -%}
+  {% set incremental_strategy = config.get('incremental_strategy') or 'merge' %}
+
   -- relations
   {%- set existing_relation = load_cached_relation(this) -%}
   {%- set target_relation = this.incorporate(type='table') -%}
@@ -17,18 +24,15 @@
   {%- else -%}
     {%- set unique_key_list = [] -%}
   {%- endif -%}
-  {%- set transaction_table = unique_key_list|length > 0 -%}
-  {%- set full_refresh_mode = (should_full_refresh()  or existing_relation.is_view) -%}
+
+  {%- set full_refresh_mode = (should_full_refresh() or existing_relation.is_view) -%}
   {%- set on_schema_change = incremental_validate_on_schema_change(config.get('on_schema_change'), default='ignore') -%}
 
-  {%- set default_incremental_strategy = 'append' -%}
-  {% if transaction_table %}
-    {%- set default_incremental_strategy = 'merge' -%}
-    {% if config.get('incremental_strategy')=='append' %}
+
+  {% if unique_key_list|length > 0 and config.get('incremental_strategy')=='append' %}
       {% do exceptions.raise_compiler_error('append strategy is not supported for incremental models with a unique key when using MaxCompute') %}
-    {% endif %}
   {% endif %}
-  {% set incremental_strategy = config.get('incremental_strategy') or default_incremental_strategy %}
+
 
   -- the temp_ and backup_ relations should not already exist in the database; get_relation
   -- will return None in that case. Otherwise, we get a relation that we can drop
@@ -49,9 +53,9 @@
   {% set to_drop = [] %}
 
   {% if existing_relation is none %}
-      {% set build_sql = create_table_as_internal(False, target_relation, sql, transaction_table) %}
+      {% set build_sql = create_table_as_internal(False, target_relation, sql, True, partition_by=partition_by) %}
   {% elif full_refresh_mode %}
-      {% set build_sql = create_table_as_internal(False, intermediate_relation, sql, transaction_table) %}
+      {% set build_sql = create_table_as_internal(False, intermediate_relation, sql, True, partition_by=partition_by) %}
       {% set need_swap = true %}
   {% else %}
     {% do run_query(get_create_table_as_sql(True, temp_relation, sql)) %}

@@ -6,7 +6,7 @@
 {%- endmacro %}
 
 
-{% macro create_table_as_internal(temporary, relation, sql, is_transactional, primary_keys=none, delta_table_bucket_num=16) -%}
+{% macro create_table_as_internal(temporary, relation, sql, is_transactional, primary_keys=none, delta_table_bucket_num=16, partition_by=none) -%}
     {%- set sql_header = config.get('sql_header', none) -%}
     {{ sql_header if sql_header is not none }}
     {%- set is_delta = is_transactional and primary_keys is not none and primary_keys|length > 0 -%}
@@ -28,6 +28,13 @@
                 {%- endfor -%})
             {%- endif -%}
             )
+            {% if partition_by -%}
+                {%- if partition_by.auto_partition -%}
+                auto partitioned by (trunc_time(`{{ partition_by.field }}`, "{{ partition_by.granularity }}"))
+                {%- else -%}
+                partitioned by (`{{ partition_by.field }}`)
+                {%- endif -%}
+            {%- endif -%}
             {%- if is_transactional -%}
                 {%- if is_delta -%}
                     tblproperties("transactional"="true", "write.bucket.num"="{{ delta_table_bucket_num }}")
