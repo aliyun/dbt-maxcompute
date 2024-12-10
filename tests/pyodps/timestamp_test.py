@@ -22,7 +22,11 @@ class TestTimestamp(object):
         print(pd_dataframe)
 
         o.write_table(
-            "timestamp_ntz_test", pd_dataframe, create_table=False, create_partition=False, lifecycle=1
+            "timestamp_ntz_test",
+            pd_dataframe,
+            create_table=False,
+            create_partition=False,
+            lifecycle=1,
         )
         # AttributeError: 'pyarrow.lib.DataType' object has no attribute 'tz'
 
