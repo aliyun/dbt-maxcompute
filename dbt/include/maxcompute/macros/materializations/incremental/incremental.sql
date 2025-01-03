@@ -2,10 +2,11 @@
 {% materialization incremental,  adapter='maxcompute' -%}
   {%- set raw_partition_by = config.get('partition_by', none) -%}
   {%- set partition_by = adapter.parse_partition_by(raw_partition_by) -%}
-  -- Not support yet
   {%- set partitions = config.get('partitions', none) -%}
+  {%- set incremental_predicates = config.get('predicates', none) or config.get('incremental_predicates', none) -%}
+
   {%- set cluster_by = config.get('cluster_by', none) -%}
-  {% set incremental_strategy = config.get('incremental_strategy') or 'merge' %}
+  {%- set incremental_strategy = config.get('incremental_strategy') or 'merge' -%}
 
   -- relations
   {%- set existing_relation = load_cached_relation(this) -%}
@@ -45,49 +46,44 @@
   {{ drop_relation_if_exists(preexisting_intermediate_relation) }}
   {{ drop_relation_if_exists(preexisting_backup_relation) }}
 
-  {{ run_hooks(pre_hooks, inside_transaction=False) }}
-
-  -- `BEGIN` happens here:
-  {{ run_hooks(pre_hooks, inside_transaction=True) }}
-
-  {% set to_drop = [] %}
+  {{ run_hooks(pre_hooks) }}
 
   {% if existing_relation is none %}
-      {% set build_sql = create_table_as_internal(False, target_relation, sql, True, partition_config=partition_by) %}
+    {%- call statement('main') -%}
+        {{ create_table_as_internal(False, target_relation, sql, True, partition_config=partition_by) }}
+    {%- endcall -%}
   {% elif full_refresh_mode %}
-      {% set build_sql = create_table_as_internal(False, intermediate_relation, sql, True, partition_config=partition_by) %}
-      {% set need_swap = true %}
+      {% do log("Hard refreshing " ~ existing_relation) %}
+      {{ adapter.drop_relation(existing_relation) }}
+      {%- call statement('main') -%}
+        {{ create_table_as_internal(False, target_relation, sql, True, partition_config=partition_by) }}
+      {%- endcall -%}
   {% else %}
-    {% do run_query(get_create_table_as_sql(True, temp_relation, sql)) %}
-    {% set contract_config = config.get('contract') %}
-    {% if not contract_config or not contract_config.enforced %}
-      {% do adapter.expand_target_column_types(
-               from_relation=temp_relation,
-               to_relation=target_relation) %}
+    {% set tmp_relation_exists = false %}
+    {% if on_schema_change != 'ignore' %}
+      {#-- Check first, since otherwise we may not build a temp table --#}
+      {#-- Python always needs to create a temp table --#}
+      {%- call statement('create_tmp_relation') -%}
+        {{ create_table_as_internal(True, tmp_relation, sql, True, partition_config=partition_by) }}
+      {%- endcall -%}
+      {% set tmp_relation_exists = true %}
+      {#-- Process schema changes. Returns dict of changes if successful. Use source columns for upserting/merging --#}
+      {% set dest_columns = process_schema_changes(on_schema_change, tmp_relation, existing_relation) %}
     {% endif %}
-    {#-- Process schema changes. Returns dict of changes if successful. Use source columns for upserting/merging --#}
-    {% set dest_columns = process_schema_changes(on_schema_change, temp_relation, existing_relation) %}
+
     {% if not dest_columns %}
       {% set dest_columns = adapter.get_columns_in_relation(existing_relation) %}
     {% endif %}
 
-    {#-- Get the incremental_strategy, the macro to use for the strategy, and build the sql --#}
-    {% set incremental_predicates = config.get('predicates', none) or config.get('incremental_predicates', none) %}
-    {% set strategy_sql_macro_func = adapter.get_incremental_strategy_macro(context, incremental_strategy) %}
-    {% set strategy_arg_dict = ({'target_relation': target_relation, 'temp_relation': temp_relation, 'unique_key': unique_key, 'dest_columns': dest_columns, 'incremental_predicates': incremental_predicates }) %}
-    {% set build_sql = strategy_sql_macro_func(strategy_arg_dict) %}
+    {% set build_sql = mc_generate_incremental_build_sql(
+        incremental_strategy, temp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists, incremental_predicates
+    ) %}
 
-  {% endif %}
-
-  {% call statement("main") %}
+    {% call statement("main") %}
       {{ build_sql }}
-  {% endcall %}
-
-  {% if need_swap %}
-      {% do adapter.rename_relation(target_relation, backup_relation) %}
-      {% do adapter.rename_relation(intermediate_relation, target_relation) %}
-      {% do to_drop.append(backup_relation) %}
+    {% endcall %}
   {% endif %}
+
 
   {% set should_revoke = should_revoke(existing_relation, full_refresh_mode) %}
   {% do apply_grants(target_relation, grant_config, should_revoke=should_revoke) %}
@@ -98,21 +94,40 @@
     {% do create_indexes(target_relation) %}
   {% endif %}
 
-  {{ run_hooks(post_hooks, inside_transaction=True) }}
+  {{ run_hooks(post_hooks) }}
 
-  -- `COMMIT` happens here
-  {% do adapter.commit() %}
-
-  {% for rel in to_drop %}
-      {% do adapter.drop_relation(rel) %}
-  {% endfor %}
-
-  {{ run_hooks(post_hooks, inside_transaction=False) }}
+  {%- if tmp_relation_exists -%}
+    {{ adapter.drop_relation(tmp_relation) }}
+  {%- endif -%}
 
   {{ return({'relations': [target_relation]}) }}
-
 {%- endmaterialization %}
 
+{% macro mc_generate_incremental_build_sql(
+    strategy, tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists, incremental_predicates
+) %}
+  {% if strategy == 'bq_insert_overwrite' %}
+    {% set build_sql = mc_generate_incremental_insert_overwrite_build_sql(
+        tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists
+    ) %}
+  {% elif strategy == 'bq_microbatch' %}
+    {% set build_sql = mc_generate_microbatch_build_sql(
+        tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists
+    ) %}
+  {% elif strategy == 'bq_merge' %}
+    {% set build_sql = mc_generate_incremental_merge_build_sql(
+        tmp_relation, target_relation, sql, unique_key, partition_by, dest_columns, tmp_relation_exists, incremental_predicates
+    ) %}
+  {% else %} {# strategy == 'dbt origin' #}
+    {%- call statement('create_tmp_relation') -%}
+      {{ create_table_as_internal(True, tmp_relation, sql, True, partition_config=partition_by) }}
+    {%- endcall -%}
+    {% set strategy_sql_macro_func = adapter.get_incremental_strategy_macro(context, strategy) %}
+    {% set strategy_arg_dict = ({'target_relation': target_relation, 'temp_relation': tmp_relation, 'unique_key': unique_key, 'dest_columns': dest_columns, 'incremental_predicates': incremental_predicates }) %}
+    {% set build_sql = strategy_sql_macro_func(strategy_arg_dict) %}
+  {% endif %}
+  {{ return(build_sql) }}
+{% endmacro %}
 
 {% macro get_quoted_list(column_names) %}
     {% set quoted = [] %}
@@ -120,4 +135,13 @@
         {%- do quoted.append(adapter.quote(col)) -%}
     {%- endfor %}
     {{ return(quoted) }}
+{% endmacro %}
+
+{% macro maxcompute__get_incremental_microbatch_sql(arg_dict) %}
+
+  {% if arg_dict["unique_key"] %}
+    {% do return(adapter.dispatch('get_incremental_merge_sql', 'dbt')(arg_dict)) %}
+  {% else %}
+    {{ exceptions.raise_compiler_error("dbt-maxcompute 'microbatch' requires a `unique_key` config") }}
+  {% endif %}
 {% endmacro %}

@@ -424,7 +424,16 @@ class MaxComputeAdapter(SQLAdapter):
         """The set of standard builtin strategies which this adapter supports out-of-the-box.
         Not used to validate custom strategies defined by end users.
         """
-        return ["append", "merge", "delete+insert", "insert_overwrite"]
+        return [
+            "append",
+            "merge",
+            "delete+insert",
+            "insert_overwrite",
+            "microbatch",
+            "bq_merge",
+            "bq_microbatch",
+            "bq_insert_overwrite",
+        ]
 
     @available.parse_none
     def load_dataframe(

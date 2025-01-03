@@ -9,15 +9,36 @@ from dbt.tests.adapter.incremental.test_incremental_on_schema_change import (
     BaseIncrementalOnSchemaChange,
 )
 from dbt.tests.adapter.incremental.test_incremental_microbatch import BaseMicrobatch
+from dbt.tests.util import run_dbt
 
 
 class TestMergeExcludeColumnsMaxCompute(BaseMergeExcludeColumns):
     pass
 
 
+_input_model_sql = """
+{{ config(materialized='table', event_time='event_time') }}
+select 1 as id, TIMESTAMP'2024-12-30 00:00:00' as event_time
+union all
+select 2 as id, TIMESTAMP'2024-12-31 00:00:00' as event_time
+union all
+select 3 as id, TIMESTAMP'2025-01-01 00:00:00' as event_time
+"""
+
+
 @pytest.mark.skip(reason="MaxCompute Api not support freeze time.")
 class TestMicrobatchMaxCompute(BaseMicrobatch):
-    pass
+
+    @pytest.fixture(scope="class")
+    def input_model_sql(self) -> str:
+        """
+        This is the SQL that defines the input model to the microbatch model, including any {{ config(..) }}.
+        event_time is a required configuration of this input
+        """
+        return _input_model_sql
+
+    def test_run_with_event_time(self, project, insert_two_rows_sql):
+        run_dbt(["run"])
 
 
 class TestIncrementalOnSchemaChange(BaseIncrementalOnSchemaChange):
