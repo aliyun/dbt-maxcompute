@@ -430,7 +430,6 @@ class MaxComputeAdapter(SQLAdapter):
             "delete+insert",
             "insert_overwrite",
             "microbatch",
-            "bq_merge",
             "bq_microbatch",
             "bq_insert_overwrite",
         ]

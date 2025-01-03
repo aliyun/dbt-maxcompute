@@ -114,10 +114,6 @@
     {% set build_sql = mc_generate_microbatch_build_sql(
         tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists
     ) %}
-  {% elif strategy == 'bq_merge' %}
-    {% set build_sql = mc_generate_incremental_merge_build_sql(
-        tmp_relation, target_relation, sql, unique_key, partition_by, dest_columns, tmp_relation_exists, incremental_predicates
-    ) %}
   {% else %} {# strategy == 'dbt origin' #}
     {%- call statement('create_tmp_relation') -%}
       {{ create_table_as_internal(True, tmp_relation, sql, True, partition_config=partition_by) }}
