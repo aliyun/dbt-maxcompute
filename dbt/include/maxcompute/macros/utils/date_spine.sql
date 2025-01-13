@@ -113,7 +113,7 @@
 
         select *
         from all_periods
-        where datediff(date_{{datepart}}, {{ end_date }}) <= 0
+        where cast(date_{{datepart}} as timestamp) <= cast({{ end_date }} as timestamp)
 
     )
 

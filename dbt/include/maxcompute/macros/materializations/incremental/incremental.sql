@@ -59,16 +59,16 @@
         {{ create_table_as_internal(False, target_relation, sql, True, partition_config=partition_by) }}
       {%- endcall -%}
   {% else %}
-    {% set tmp_relation_exists = false %}
+    {% set temp_relation_exists = false %}
     {% if on_schema_change != 'ignore' %}
       {#-- Check first, since otherwise we may not build a temp table --#}
       {#-- Python always needs to create a temp table --#}
-      {%- call statement('create_tmp_relation') -%}
-        {{ create_table_as_internal(True, tmp_relation, sql, True, partition_config=partition_by) }}
+      {%- call statement('create_temp_relation') -%}
+        {{ create_table_as_internal(True, temp_relation, sql, True, partition_config=partition_by) }}
       {%- endcall -%}
-      {% set tmp_relation_exists = true %}
+      {% set temp_relation_exists = true %}
       {#-- Process schema changes. Returns dict of changes if successful. Use source columns for upserting/merging --#}
-      {% set dest_columns = process_schema_changes(on_schema_change, tmp_relation, existing_relation) %}
+      {% set dest_columns = process_schema_changes(on_schema_change, temp_relation, existing_relation) %}
     {% endif %}
 
     {% if not dest_columns %}
@@ -76,7 +76,7 @@
     {% endif %}
 
     {% set build_sql = mc_generate_incremental_build_sql(
-        incremental_strategy, temp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists, incremental_predicates
+        incremental_strategy, temp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, temp_relation_exists, incremental_predicates
     ) %}
 
     {% call statement("main") %}
