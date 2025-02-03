@@ -8,6 +8,7 @@ from dbt.adapters.sql import SQLConnectionManager
 from dbt.adapters.events.logging import AdapterLogger
 
 from odps import ODPS, options
+from odps.accounts import StsAccount
 
 from dbt.adapters.maxcompute.context import GLOBAL_SQL_HINTS
 from dbt.adapters.maxcompute.wrapper import ConnectionWrapper
@@ -20,11 +21,13 @@ class MaxComputeCredentials(Credentials):
     endpoint: str
     accessId: str
     accessKey: str
+    securityToken: str | None = None
 
     _ALIASES = {
         "project": "database",
         "ak": "accessId",
         "sk": "accessKey",
+        "sts": "securityToken",
     }
 
     @property
@@ -50,12 +53,24 @@ class MaxComputeConnectionManager(SQLConnectionManager):
 
         credentials = connection.credentials
 
-        o = ODPS(
-            credentials.accessId,
-            credentials.accessKey,
-            project=credentials.database,
-            endpoint=credentials.endpoint,
-        )
+        # Use STS credentials
+        if credentials.securityToken is not None:
+            account = StsAccount(
+                credentials.accessId, credentials.accessKey, credentials.securityToken
+            )
+            o = ODPS(
+                account=account,
+                project=credentials.database,
+                endpoint=credentials.endpoint,
+            )
+        # Use regular SK credentials
+        else:
+            o = ODPS(
+                credentials.accessId,
+                credentials.accessKey,
+                project=credentials.database,
+                endpoint=credentials.endpoint,
+            )
         o.schema = credentials.schema
         # always use UTC timezone
         options.local_timezone = False
