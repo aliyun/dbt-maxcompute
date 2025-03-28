@@ -8,5 +8,5 @@ GLOBAL_SQL_HINTS = {
     "odps.sql.allow.cartesian": "true",
     "odps.sql.timezone": "GMT",
     "odps.sql.allow.schema.evolution": "true",
-    "odps.sql.groupby.position.alias": "true",
+    "odps.sql.groupby.orderby.position.alias": "false",
 }
