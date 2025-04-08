@@ -1,10 +1,16 @@
-
-
+--https://help.aliyun.com/zh/maxcompute/user-guide/datediff
 {% macro maxcompute__datediff(first_date, second_date, datepart) %}
     {% set datepart = datepart.lower() %}
 
-    {%- if datepart in ['day', 'month', 'year', 'microsecond', 'isoweek', 'week', 'weekday'] -%}
+    {%- if datepart in ['year', 'yyyy', 'month', 'mon', 'mm', 'day', 'dd', 'hour', 'hh', 'mi', 'ss' ,'ff3'] -%}
         datediff({{second_date}}, {{first_date}}, '{{datepart}}')
+	{%- elif datepart in ['minute', 'second', 'microsecond'] -%}
+	    {% set mapped_datepart = {
+            'minute': 'mi',
+            'second': 'ss',
+			'microsecond': 'ff3'
+        }[datepart] %}
+        datediff({{ second_date }}, {{ first_date }}, '{{ mapped_datepart }}')
     {%- elif datepart == 'week' -%}
         case when datediff({{first_date}}, {{second_date}}) < 0
             then floor( datediff({{second_date}}, {{first_date}}) / 7 )
@@ -18,36 +24,14 @@
             else 0 end
     {%- elif datepart == 'quarter' -%}
         ((year({{second_date}}) - year({{first_date}})) * 4 + quarter({{second_date}}) - quarter({{first_date}}))
-    {%- elif datepart in ('hour', 'quarter', 'minute', 'second') -%}
-        {%- set divisor -%}
-            {%- if datepart == 'hour' -%} 3600
-            {%- elif datepart == 'quarter' -%} 900
-            {%- elif datepart == 'minute' -%} 60
-            {%- elif datepart == 'second' -%} 1
-            {%- endif -%}
-        {%- endset -%}
-        case when datediff({{first_date}}, {{second_date}}) < 0
-            then ceil((
-                unix_timestamp( {{second_date}} ) - unix_timestamp( {{first_date}} )
-            ) / {{divisor}})
-            else floor((
-                unix_timestamp( {{second_date}} ) - unix_timestamp( {{first_date}} )
-            ) / {{divisor}})
-            end
-    {%- elif datepart in ('millisecond', 'microsecond') -%}
-        {%- set divisor -%}
-            {%- if datepart == 'microsecond' -%} 1000
-            {%- elif datepart == 'millisecond' -%} 1
-            {%- endif -%}
-        {%- endset -%}
-
+    {%- elif datepart == 'microsecond' -%}
         case when datediff({{first_date}}, {{second_date}}) < 0
             then ceil((
                 to_millis( {{second_date}} ) - to_millis( {{first_date}} )
-            ) / {{divisor}})
+            ) / 1000
             else floor((
                 to_millis( {{second_date}} ) - to_millis( {{first_date}} )
-            ) / {{divisor}})
+            ) / 1000
             end
     {%- else -%}
 
