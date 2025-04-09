@@ -71,11 +71,15 @@
     {% for c in get_column_schema_from_query(sql) -%}
     {% if c.name not in partition_by_cols -%}
         {{- "," if ns.needs_comma -}}  {# 根据命名空间变量判断逗号 #}
-        {{- c.name }} {{ c.dtype -}}
-        {% if primary_keys and c.name in  primary_keys -%}not null{%- endif %}
-        {% if model_columns and c.name in  model_columns -%}
-           {{ "COMMENT" }} {{ quote_and_escape(model_columns[c.name].description) }}
-        {%- endif %}
+        {{ c.name }} {{ c.dtype }}
+        {% if primary_keys and c.name in  primary_keys %}
+          not null  {# 主键自动添加 #}
+        {% else %}
+          {% for constraint in model_columns[c.name].constraints %}  {# 从模型配置中读取约束 #}
+            {% if constraint.type == 'not_null' %} not null{% endif %}
+            {{ "COMMENT" }} {{ quote_and_escape(model_columns[c.name].description) }}
+          {% endfor %}
+        {% endif %}
         {% set ns.needs_comma = true %}  {# 标记后续列需要逗号 #}
     {%- endif %}
     {% endfor %}
