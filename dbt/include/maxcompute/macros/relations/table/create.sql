@@ -72,10 +72,14 @@
     {% if c.name not in partition_by_cols -%}
         {{- "," if ns.needs_comma -}}  {# 根据命名空间变量判断逗号 #}
         {{ c.name }} {{ c.dtype }}
-        {% if primary_keys and c.name in  primary_keys %}not null{% endif %}
-        {% if model_columns and c.name in  model_columns %}  {# 从模型配置中读取约束 #}
+        {% if primary_keys and c.name in primary_keys %}not null{% endif %}
+        {% if model_columns and c.name in model_columns %}  {# 从模型配置中读取约束 #}
            {% for constraint in model_columns[c.name].constraints %}
-               {% if constraint.type == 'not_null' %} not null{% endif %}
+               {% if constraint.type == 'not_null' %}
+                   {% if not primary_keys or c.name not in primary_keys %}
+                      not null   {# 避免重复增加 not null #}
+                   {% endif %}
+               {% endif %}
            {% endfor %}
            {{ "COMMENT" }} {{ quote_and_escape(model_columns[c.name].description) }}
         {%- endif %}
