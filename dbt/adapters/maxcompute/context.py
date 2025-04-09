@@ -7,5 +7,5 @@ GLOBAL_SQL_HINTS = {
     "odps.sql.submit.mode": "script",
     "odps.sql.allow.cartesian": "true",
     "odps.sql.timezone": "GMT",
-    "odps.sql.allow.schema.evolution": "true"
+    "odps.sql.allow.schema.evolution": "true",
 }
