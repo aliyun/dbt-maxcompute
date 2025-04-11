@@ -89,9 +89,9 @@ class SettingParser:
                         break
                     i += 1
                 if found_semicolon:
-                    exclude_ranges.append((current_start_index, i))
                     kv = s[key_value_start : i - 1].strip()
-                    self._parse_key_value(kv, settings, errors)
+                    if self._parse_key_value(kv, settings, errors):
+                        exclude_ranges.append((current_start_index, i))
                 else:
                     errors.append("Invalid SET statement: missing semicolon")
                 current_state = State.DEFAULT
@@ -99,7 +99,6 @@ class SettingParser:
 
             elif current_state == State.STOP:
                 i = s_length
-
         # Build remaining query
         remaining = []
         current_pos = 0
@@ -112,15 +111,16 @@ class SettingParser:
 
         return ParseResult(settings=settings, remaining_query="".join(remaining), errors=errors)
 
-    def _parse_key_value(self, kv: str, settings: Dict[str, str], errors: List[str]):
+    def _parse_key_value(self, kv: str, settings: Dict[str, str], errors: List[str]) -> bool:
         eq_idx = kv.find("=")
         if eq_idx == -1:
             errors.append(f"Invalid key-value pair '{kv}': missing '='")
-            return
+            return False
         key = kv[:eq_idx].strip()
         if not key:
             errors.append(f"Invalid key-value pair '{kv}': empty key")
-            return
+            return False
         value = kv[eq_idx + 1 :].strip() if eq_idx < len(kv) - 1 else ""
         value = value.replace("\\;", ";")
         settings[key] = value
+        return True
