@@ -7,6 +7,7 @@ from typing import Optional, List, Dict, Any, Set, FrozenSet, Tuple
 
 import agate
 import numpy as np
+import odps.models
 import pandas as pd
 import pytz
 from agate import Table
@@ -35,7 +36,7 @@ from dbt.adapters.maxcompute.relation import MaxComputeRelation
 from dbt.adapters.events.logging import AdapterLogger
 
 from dbt.adapters.maxcompute.relation_configs._partition import PartitionConfig
-from dbt.adapters.maxcompute.utils import is_schema_not_found, quote_string
+from dbt.adapters.maxcompute.utils import is_schema_not_found, quote_string, quote_ref
 
 logger = AdapterLogger("MaxCompute")
 
@@ -87,7 +88,9 @@ class MaxComputeAdapter(SQLAdapter):
         return conn.handle.odps
 
     @available.parse_none
-    def get_odps_table_by_relation(self, relation: MaxComputeRelation, retry_times=1):
+    def get_odps_table_by_relation(
+        self, relation: MaxComputeRelation, retry_times=1
+    ) -> Optional[odps.models.Table]:
         # Sometimes the newly created table will be judged as not existing, so add retry to obtain it.
         for i in range(retry_times):
             table = self.get_odps_client().get_table(
@@ -555,6 +558,31 @@ class MaxComputeAdapter(SQLAdapter):
             self.run_raw_sql(sql, None)
         if relation.is_materialized_view:
             raise DbtRuntimeError("Unsupported set comment to materialized view. ")
+        return ""
+
+    @available
+    def add_comment_to_column(
+        self, relation: MaxComputeRelation, column_name: str, comment: str
+    ) -> str:
+        """
+        Add comment to column.
+        """
+        table = self.get_odps_table_by_relation(relation)
+        if table is not None:
+            for column in table.table_schema.columns:
+                if column.name == column_name and column.comment != comment:
+                    if relation.is_table:
+                        sql = f"ALTER TABLE {relation.database}.{relation.schema}.{relation.identifier} CHANGE COLUMN {quote_ref(column_name)} COMMENT {quote_string(comment)};"
+                        self.run_raw_sql(sql, None)
+                    if relation.is_view:
+                        sql = f"ALTER VIEW {relation.database}.{relation.schema}.{relation.identifier} CHANGE COLUMN {quote_ref(column_name)} COMMENT {quote_string(comment)};"
+                        self.run_raw_sql(sql, None)
+                    if relation.is_materialized_view:
+                        raise DbtRuntimeError("Unsupported set comment to materialized view. ")
+                else:
+                    logger.debug(
+                        f"The comments for column {column_name} do not need to be modified because the same comments already exist."
+                    )
         return ""
 
     @available

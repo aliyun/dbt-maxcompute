@@ -15,10 +15,10 @@ dbt docs: https://docs.getdbt.com/docs/contributing/building-a-new-adapter
     {% call statement('rename_relation') -%}
         {% if from_relation.is_table -%}
             ALTER TABLE {{ from_relation.render() }}
-            RENAME TO {{ to_relation.identifier }};
+            RENAME TO {{ quote_ref(to_relation.identifier) }};
         {% elif from_relation.is_view -%}
             ALTER VIEW {{ from_relation.render() }}
-            RENAME TO {{ to_relation.identifier }};
+            RENAME TO {{ quote_ref(to_relation.identifier) }};
         {% else -%}
             {{ get_rename_materialized_view_sql_2(from_relation, to_relation) }}
         {% endif -%}
@@ -32,3 +32,8 @@ dbt docs: https://docs.getdbt.com/docs/contributing/building-a-new-adapter
 {% macro maxcompute__current_timestamp() -%}
     current_timestamp()
 {%- endmacro %}
+
+{% macro quote_ref(input_string) %}
+    {% set escaped_string = input_string | replace("`", "``") %}
+    `{{ escaped_string }}`
+{% endmacro %}
