@@ -3,6 +3,20 @@ import functools
 
 from odps.errors import ODPSError, NoSuchObject
 
+from pathlib import Path
+
+# used for this adapter's version and in determining the compatible dbt-core version
+VERSION = Path(__file__).parent / "__version__.py"
+
+
+def _dbt_maxcompute_version() -> str:
+    """
+    Pull the package version from the main package version file
+    """
+    attributes = {}
+    exec(VERSION.read_text(), attributes)
+    return attributes["version"]
+
 
 def quote_string(value: str) -> str:
     value = value.replace("'", "\\'")

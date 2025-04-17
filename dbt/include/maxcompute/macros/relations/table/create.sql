@@ -10,7 +10,9 @@
 
 
 {% macro create_table_as_internal(temporary, relation, sql, is_transactional, primary_keys=none, delta_table_bucket_num=16, partition_config=none, lifecycle=none) -%}
-    {%- set sql_header = config.get('sql_header', none) -%}
+    {%- set sql_hints = config.get('sql_hints', none) -%}
+    {%- set sql_header = merge_sql_hints_and_header(sql_hints, config.get('sql_header', none)) -%}
+
     {%- set is_delta = is_transactional and primary_keys is not none and primary_keys|length > 0 -%}
 
     {% call statement('create_table', auto_begin=False) -%}
@@ -22,7 +24,7 @@
                 {{ get_table_columns_and_constraints_without_brackets(partition_config) }}
                 {%- set sql = get_select_subquery(sql) %}
             {%- else -%}
-                {{ get_table_columns(sql, primary_keys, partition_config) }}
+                {{ get_table_columns(sql, primary_keys, partition_config, sql_header) }}
             {%- endif -%}
             {% if is_delta -%}
                 ,primary key(
@@ -54,7 +56,7 @@
         partition({{ partition_config.render(False) }})
     {%- endif -%}
     (
-    {% for c in get_column_schema_from_query(sql) -%}
+    {% for c in get_column_schema_from_query(sql, sql_header) -%}
         `{{ c.name }}`{{ "," if not loop.last }}
     {% endfor %}
     )(
@@ -63,12 +65,12 @@
 {%- endmacro %}
 
 
-{% macro get_table_columns(sql, primary_keys=none, partition_config=None) -%}
+{% macro get_table_columns(sql, primary_keys=none, partition_config=None, sql_header=None) -%}
     {% set model_columns = model.columns %}
     {% set partition_by_cols = [] if (partition_config is none or partition_config.auto_partition()) else partition_config.fields %}
     {% set ns = namespace(needs_comma=false) %}  {# 初始化命名空间变量 #}
 
-    {% for c in get_column_schema_from_query(sql) -%}
+    {% for c in get_column_schema_from_query(sql, sql_header) -%}
     {% if c.name not in partition_by_cols -%}
         {{- "," if ns.needs_comma -}}  {# 根据命名空间变量判断逗号 #}
         {{ c.name }} {{ c.dtype }}
@@ -105,3 +107,16 @@
         {{ c }}{{ "," if not loop.last }}
     {% endfor -%}
 {%- endmacro %}
+
+{% macro merge_sql_hints_and_header(sql_hints=None, sql_header=None) -%}
+    {%- set parts = [] -%}
+    {%- if sql_hints -%}
+        {%- for key, value in sql_hints.items() -%}
+            {%- do parts.append('set ' ~ key ~ '=' ~ value ~ ';') -%}
+        {%- endfor -%}
+    {%- endif -%}
+    {%- if sql_header -%}
+        {%- do parts.append(sql_header) -%}
+    {%- endif -%}
+    {{- parts | join('\n') | trim -}}
+{%- endmacro -%}
