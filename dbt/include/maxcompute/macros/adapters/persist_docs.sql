@@ -1,6 +1,6 @@
 {% macro maxcompute__persist_docs(relation, model, for_relation, for_columns) -%}
   {% if for_relation and config.persist_relation_docs() and model.description %}
-    {{ alter_relation_comment(relation, model.description) }}
+    {% do run_query(alter_relation_comment(relation, model.description)) %}
   {% endif %}
 
   {% if for_columns and config.persist_column_docs() and model.columns %}
@@ -17,5 +17,9 @@
 {% endmacro %}
 
 {% macro maxcompute__alter_relation_comment(relation, relation_comment) -%}
+  {%- set sql_hints = config.get('sql_hints', none) -%}
+  {%- set sql_header = merge_sql_hints_and_header(sql_hints, config.get('sql_header', none)) -%}
+
+  {{ sql_header if sql_header is not none }}
   {{ adapter.add_comment(relation, relation_comment) }}
 {% endmacro %}

@@ -550,12 +550,12 @@ class MaxComputeAdapter(SQLAdapter):
         """
         if relation.is_table:
             sql = f"ALTER TABLE {relation.database}.{relation.schema}.{relation.identifier} SET COMMENT {quote_string(comment)};"
-            self.run_raw_sql(sql, None)
+            return sql
         if relation.is_view:
             view_text = self.get_odps_table_by_relation(relation).view_text
 
             sql = f"CREATE OR REPLACE VIEW {relation.database}.{relation.schema}.{relation.identifier} COMMENT {quote_string(comment)} AS {view_text};"
-            self.run_raw_sql(sql, None)
+            return sql
         if relation.is_materialized_view:
             raise DbtRuntimeError("Unsupported set comment to materialized view. ")
         return ""

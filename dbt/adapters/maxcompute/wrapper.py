@@ -1,3 +1,4 @@
+import copy
 import time
 
 from dbt.adapters.events.logging import AdapterLogger
@@ -12,7 +13,7 @@ class ConnectionWrapper(Connection):
         return CursorWrapper(
             self,
             *args,
-            hints=self._hints,
+            hints=copy.deepcopy(self._hints),
             **kwargs,
         )
 

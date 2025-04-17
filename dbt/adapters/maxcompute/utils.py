@@ -13,7 +13,7 @@ def _dbt_maxcompute_version() -> str:
     """
     Pull the package version from the main package version file
     """
-    attributes = {}
+    attributes: dict[str, str] = {}
     exec(VERSION.read_text(), attributes)
     return attributes["version"]
 
