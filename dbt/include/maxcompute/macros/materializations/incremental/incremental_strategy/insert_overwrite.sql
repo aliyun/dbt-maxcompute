@@ -28,7 +28,7 @@
 ) %}
       {% if not tmp_relation_exists %}
         {%- call statement('create_tmp_relation') -%}
-          {{ create_table_as_internal(True, tmp_relation, sql, True, partition_config=partition_by) }}
+          {{ create_table_as_internal(True, tmp_relation, sql, True, partition_config=partition_by, tblproperties={"table.format.version": "2"}) }}
         {%- endcall -%}
       {% endif %}
       -- 3. run the merge statement

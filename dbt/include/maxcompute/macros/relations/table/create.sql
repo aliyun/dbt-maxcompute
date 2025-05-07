@@ -4,12 +4,13 @@
     {%- set delta_table_bucket_num = config.get('delta_table_bucket_num', 16)-%}
     {%- set raw_partition_by = config.get('partition_by', none) -%}
     {%- set lifecycle = config.get('lifecycle', none) -%}
+    {%- set tblproperties = config.get('tblproperties', none) -%}
     {%- set partition_config = adapter.parse_partition_by(raw_partition_by) -%}
-    {{ create_table_as_internal(temporary, relation, sql, is_transactional, primary_keys, delta_table_bucket_num, partition_config, lifecycle) }}
+    {{ create_table_as_internal(temporary, relation, sql, is_transactional, primary_keys, delta_table_bucket_num, partition_config, lifecycle, tblproperties) }}
 {%- endmacro %}
 
 
-{% macro create_table_as_internal(temporary, relation, sql, is_transactional, primary_keys=none, delta_table_bucket_num=16, partition_config=none, lifecycle=none) -%}
+{% macro create_table_as_internal(temporary, relation, sql, is_transactional, primary_keys=none, delta_table_bucket_num=16, partition_config=none, lifecycle=none, tblproperties=none) -%}
     {%- set sql_hints = config.get('sql_hints', none) -%}
     {%- set sql_header = merge_sql_hints_and_header(sql_hints, config.get('sql_header', none)) -%}
 
@@ -36,13 +37,23 @@
             {% if partition_config -%}
                 {{ partition_by(partition_config) }}
             {%- endif -%}
-            {%- if is_transactional -%}
-                {%- if is_delta -%}
-                    tblproperties("transactional"="true", "write.bucket.num"="{{ delta_table_bucket_num }}")
-                {%- else -%}
-                    tblproperties("transactional"="true")
-                {%- endif -%}
-            {%- endif -%}
+            {% set extra_props = {} %}
+            {% if tblproperties %}
+                {% do extra_props.update(tblproperties) %}
+            {% endif %}
+            {% if is_transactional %}
+                {% do extra_props.update({"transactional": "true"}) %}
+                {% if is_delta %}
+                    {% do extra_props.update({"write.bucket.num": delta_table_bucket_num}) %}
+                {% endif %}
+            {% endif %}
+            {% if extra_props %}
+                tblproperties(
+                    {% for key, value in extra_props.items() %}
+                        "{{ key }}"="{{ value }}"{{ "," if not loop.last }}
+                    {% endfor %}
+                )
+            {% endif %}
             {%- if lifecycle %}
                 LIFECYCLE {{ lifecycle }}
             {%- elif temporary %}

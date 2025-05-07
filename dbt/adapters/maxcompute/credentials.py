@@ -101,5 +101,7 @@ class MaxComputeCredentials(Credentials):
             project=self.database,
             endpoint=self.endpoint,
         )
-        GLOBAL_SQL_HINTS.update(self.global_hints)
+        o.schema = self.schema
+        if self.global_hints:
+            GLOBAL_SQL_HINTS.update(self.global_hints)
         return o
