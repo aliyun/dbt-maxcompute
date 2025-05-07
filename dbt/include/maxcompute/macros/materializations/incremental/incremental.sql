@@ -50,13 +50,13 @@
 
   {% if existing_relation is none %}
     {%- call statement('main') -%}
-        {{ create_table_as_internal(False, target_relation, sql, True, partition_config=partition_by, lifecycle=lifecycle, tblproperties={"table.format.version": "2"}) }}
+        {{ create_table_as_internal(False, target_relation, sql, True, partition_config=partition_by, lifecycle=lifecycle) }}
     {%- endcall -%}
   {% elif full_refresh_mode %}
       {% do log("Hard refreshing " ~ existing_relation) %}
       {{ adapter.drop_relation(existing_relation) }}
       {%- call statement('main') -%}
-        {{ create_table_as_internal(False, target_relation, sql, True, partition_config=partition_by, lifecycle=lifecycle, tblproperties={"table.format.version": "2"}) }}
+        {{ create_table_as_internal(False, target_relation, sql, True, partition_config=partition_by, lifecycle=lifecycle) }}
       {%- endcall -%}
   {% else %}
     {% set temp_relation_exists = false %}
@@ -64,7 +64,7 @@
       {#-- Check first, since otherwise we may not build a temp table --#}
       {#-- Python always needs to create a temp table --#}
       {%- call statement('create_temp_relation') -%}
-        {{ create_table_as_internal(True, temp_relation, sql, True, partition_config=partition_by, tblproperties={"table.format.version": "2"}) }}
+        {{ create_table_as_internal(True, temp_relation, sql, True, partition_config=partition_by) }}
       {%- endcall -%}
       {% set temp_relation_exists = true %}
       {#-- Process schema changes. Returns dict of changes if successful. Use source columns for upserting/merging --#}
@@ -113,7 +113,7 @@
   {% else %} {# strategy == 'dbt origin' #}
     {%- call statement('create_temp_relation') -%}
       {% if not temp_relation_exists %}
-          {{ create_table_as_internal(True, temp_relation, sql, True, partition_config=partition_by, tblproperties={"table.format.version": "2"}) }}
+          {{ create_table_as_internal(True, temp_relation, sql, True, partition_config=partition_by) }}
       {% endif %}
     {%- endcall -%}
     {% set strategy_sql_macro_func = adapter.get_incremental_strategy_macro(context, strategy) %}
