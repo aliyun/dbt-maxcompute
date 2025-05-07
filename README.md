@@ -74,20 +74,38 @@ jaffle_shop: # this needs to match the profile in your dbt_project.yml file
 
 Currently we support the following parameters：
 
-| **Field**           | **Description**                                                                                    | **Default Value**       |
-|---------------------|----------------------------------------------------------------------------------------------------|-------------------------|
-| `type`              | Specifies the type of database connection; must be set to "maxcompute" for MaxCompute connections. | `"maxcompute"`          |
-| `project`           | The name of your MaxCompute project.                                                               | N/A (Must be specified) |
-| `endpoint`          | The endpoint URL for connecting to MaxCompute.                                                     | N/A (Must be specified) |
-| `schema`            | The namespace schema that the models will use in MaxCompute.                                       | N/A (Must be specified) |
-| `auth_type`         | Authentication type for accessing MaxCompute                                                       | `"access_key"`          |
-| `access_key_id`     | The Access ID for authentication with MaxCompute.                                                  | N/A                     |
-| `access_key_secret` | The Access Key for authentication with MaxCompute.                                                 | N/A                     |
-| other auth type     | such as STS, see [Authentication Configuration](docs/authentication.md)                            | N/A                     |
+| **Field**           | **Description**                                                                                             | **Default Value**         |
+|---------------------|-------------------------------------------------------------------------------------------------------------|----------------------------|
+| `type`              | The type of database connection. Must be set to `"maxcompute"` for MaxCompute connections.                  | `"maxcompute"`             |
+| `project`           | The name of your MaxCompute project.                                                                        | **Required (no default)**  |
+| `endpoint`          | The endpoint URL used to connect to MaxCompute.                                                             | **Required (no default)**  |
+| `schema`            | The namespace schema that the models will use in MaxCompute.                                                | **Required (no default)**  |
+| `global_hints`      | Global SQL hints applied to all queries for optimization or compatibility.                                  | See below for defaults     |
+| `auth_type`         | Authentication method for accessing MaxCompute.                                                             | `"access_key"`             |
+| `access_key_id`     | Access ID used for authentication.                                                                          | **Required if using access key auth** |
+| `access_key_secret` | Access Key Secret used for authentication.                                                                  | **Required if using access key auth** |
+| Other auth options  | Alternative authentication methods such as STS. See [Authentication Configuration](docs/authentication.md). | **Varies by auth type** |
 
+> **Note**: Fields marked with "Required" must be explicitly specified in your configuration.
 
-**Notes**: The fields marked as "N/A (Must be specified)" indicate that these values are required and do not have
-default values.
+**Global Hints**
+
+MaxCompute supports global SQL hints to control query behavior and optimize performance. The following are the default global hints used by our system:
+
+```yaml
+odps.sql.type.system.odps2: "true"
+odps.sql.decimal.odps2: "true"
+odps.sql.hive.compatible: "true"
+odps.sql.allow.fullscan: "true"
+odps.sql.select.output.format: "csv"
+odps.sql.submit.mode: "script"
+odps.sql.allow.cartesian: "true"
+odps.sql.timezone: "GMT"
+odps.sql.allow.schema.evolution: "true"
+```
+
+You can override these defaults by specifying your own `global_hints` in the `profile.yml` file. Your custom hints will be merged with the defaults — you do not need to repeat the entire list unless you want to change specific values.
+
 
 ### Run you dbt models
 

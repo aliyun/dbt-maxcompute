@@ -7,10 +7,13 @@ from dbt.adapters.contracts.connection import Credentials
 from odps import ODPS
 from odps.accounts import CredentialProviderAccount
 
+from dbt.adapters.maxcompute.context import GLOBAL_SQL_HINTS
+
 
 @dataclass
 class MaxComputeCredentials(Credentials):
     endpoint: str
+    global_hints: Optional[dict] = None
 
     # auth config: All configuration items supported by alibabacloud_credentials
     # It should be noted that in order to avoid ambiguity,
@@ -98,5 +101,5 @@ class MaxComputeCredentials(Credentials):
             project=self.database,
             endpoint=self.endpoint,
         )
-        o.schema = self.schema
+        GLOBAL_SQL_HINTS.update(self.global_hints)
         return o
