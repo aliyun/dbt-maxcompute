@@ -42,7 +42,7 @@ setup(
     name="dbt-maxcompute",
     version=_dbt_maxcompute_version(),
     description="The MaxCompute adapter plugin for dbt",
-    long_description=README.read_text(),
+    long_description=README.read_text(encoding="utf-8", errors="ignore"),
     long_description_content_type="text/markdown",
     author="Alibaba Cloud MaxCompute Team",
     author_email="zhangdingxin.zdx@alibaba-inc.com",

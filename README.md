@@ -101,7 +101,7 @@ While dbt core provides native configurations like `materialized` and `sql_heade
 **dbt-maxcompute specific configurations** that control table creation behavior during materialization.
 
 
-#### 🛠️ dbt-maxcompute Specific Configurations
+#### dbt-maxcompute Specific Configurations
 
 | Parameter                  | Type               | Default                | Description                                                                                                                                                                                                                                                                                                                          |
 |----------------------------|--------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
