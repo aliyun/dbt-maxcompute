@@ -18,10 +18,10 @@
 {% endmacro %}
 
 {% macro mc_generate_microbatch_build_sql(
-      tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists
+      tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists, tblproperties
 ) %}
     {% set build_sql = mc_insert_overwrite_sql(
-        tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists
+        tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists, tblproperties
     ) %}
 
     {{ return(build_sql) }}

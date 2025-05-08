@@ -14,13 +14,13 @@
 {%- endmacro %}
 
 
-{% macro build_snapshot_staging_table(strategy, sql, target_relation) %}
+{% macro build_snapshot_staging_table(strategy, sql, target_relation, tblproperties) %}
     {% set temp_relation = make_temp_relation(target_relation) %}
 
     {% set select = snapshot_staging_table(strategy, sql, target_relation) %}
 
     {% call statement('build_snapshot_staging_relation') %}
-        {{ create_table_as_internal(True, temp_relation, select, True) }}
+        {{ create_table_as_internal(True, temp_relation, select, True, tblproperties=tblproperties) }}
     {% endcall %}
 
     {% do return(temp_relation) %}
@@ -83,6 +83,7 @@
   {%- set unique_key = config.get('unique_key') %}
   -- grab current tables grants config for comparision later on
   {%- set grant_config = config.get('grants') -%}
+  {%- set tblproperties = config.get('tblproperties', none) -%}
 
   {% set target_relation_exists, target_relation = get_or_create_relation(
           database=model.database,
@@ -108,7 +109,7 @@
 
       {% set build_sql = build_snapshot_table(strategy, model['compiled_code']) %}
       {% set build_or_select_sql = build_sql %}
-      {% set final_sql = create_table_as_internal(False, target_relation, build_sql, True) %}
+      {% set final_sql = create_table_as_internal(False, target_relation, build_sql, True, tblproperties=tblproperties) %}
 
   {% else %}
 
@@ -117,7 +118,7 @@
       {{ adapter.valid_snapshot_target(target_relation, columns) }}
 
       {% set build_or_select_sql = snapshot_staging_table(strategy, sql, target_relation) %}
-      {% set staging_table = build_snapshot_staging_table(strategy, sql, target_relation) %}
+      {% set staging_table = build_snapshot_staging_table(strategy, sql, target_relation, tblproperties) %}
 
       -- this may no-op if the database does not require column expansion
       {% do adapter.expand_target_column_types(from_relation=staging_table,

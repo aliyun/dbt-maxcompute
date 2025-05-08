@@ -7,7 +7,10 @@
   {%- set incremental_predicates = config.get('predicates', none) or config.get('incremental_predicates', none) -%}
 
   {%- set cluster_by = config.get('cluster_by', none) -%}
+  {%- set tblproperties = config.get('tblproperties', none) -%}
   {%- set incremental_strategy = config.get('incremental_strategy') or 'merge' -%}
+  {%- set sql_hints = config.get('sql_hints', none) -%}
+  {%- set sql_header = merge_sql_hints_and_header(sql_hints, config.get('sql_header', none)) -%}
 
   -- relations
   {%- set existing_relation = load_cached_relation(this) -%}
@@ -50,13 +53,13 @@
 
   {% if existing_relation is none %}
     {%- call statement('main') -%}
-        {{ create_table_as_internal(False, target_relation, sql, True, partition_config=partition_by, lifecycle=lifecycle) }}
+        {{ create_table_as_internal(False, target_relation, sql, True, partition_config=partition_by, lifecycle=lifecycle, tblproperties=tblproperties) }}
     {%- endcall -%}
   {% elif full_refresh_mode %}
       {% do log("Hard refreshing " ~ existing_relation) %}
       {{ adapter.drop_relation(existing_relation) }}
       {%- call statement('main') -%}
-        {{ create_table_as_internal(False, target_relation, sql, True, partition_config=partition_by, lifecycle=lifecycle) }}
+        {{ create_table_as_internal(False, target_relation, sql, True, partition_config=partition_by, lifecycle=lifecycle, tblproperties=tblproperties) }}
       {%- endcall -%}
   {% else %}
     {% set temp_relation_exists = false %}
@@ -64,7 +67,7 @@
       {#-- Check first, since otherwise we may not build a temp table --#}
       {#-- Python always needs to create a temp table --#}
       {%- call statement('create_temp_relation') -%}
-        {{ create_table_as_internal(True, temp_relation, sql, True, partition_config=partition_by) }}
+        {{ create_table_as_internal(True, temp_relation, sql, True, partition_config=partition_by, tblproperties=tblproperties) }}
       {%- endcall -%}
       {% set temp_relation_exists = true %}
       {#-- Process schema changes. Returns dict of changes if successful. Use source columns for upserting/merging --#}
@@ -76,10 +79,11 @@
     {% endif %}
 
     {% set build_sql = mc_generate_incremental_build_sql(
-        incremental_strategy, temp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, temp_relation_exists, incremental_predicates
+        incremental_strategy, temp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, temp_relation_exists, incremental_predicates, tblproperties
     ) %}
 
     {% call statement("main") %}
+      {{ sql_header if sql_header is not none }}
       {{ build_sql }}
     {% endcall %}
   {% endif %}
@@ -100,20 +104,20 @@
 {%- endmaterialization %}
 
 {% macro mc_generate_incremental_build_sql(
-    strategy, temp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, temp_relation_exists, incremental_predicates
+    strategy, temp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, temp_relation_exists, incremental_predicates, tblproperties
 ) %}
   {% if strategy == 'insert_overwrite' %}
     {% set build_sql = mc_generate_incremental_insert_overwrite_build_sql(
-        temp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, temp_relation_exists
+        temp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, temp_relation_exists, tblproperties
     ) %}
   {% elif strategy == 'microbatch' %}
     {% set build_sql = mc_generate_microbatch_build_sql(
-        temp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, temp_relation_exists
+        temp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, temp_relation_exists, tblproperties
     ) %}
   {% else %} {# strategy == 'dbt origin' #}
     {%- call statement('create_temp_relation') -%}
       {% if not temp_relation_exists %}
-          {{ create_table_as_internal(True, temp_relation, sql, True, partition_config=partition_by) }}
+          {{ create_table_as_internal(True, temp_relation, sql, True, partition_config=partition_by, tblproperties=tblproperties) }}
       {% endif %}
     {%- endcall -%}
     {% set strategy_sql_macro_func = adapter.get_incremental_strategy_macro(context, strategy) %}

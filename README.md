@@ -74,24 +74,49 @@ jaffle_shop: # this needs to match the profile in your dbt_project.yml file
 
 Currently we support the following parameters：
 
-| **Field**           | **Description**                                                                                             | **Default Value**         |
-|---------------------|-------------------------------------------------------------------------------------------------------------|----------------------------|
-| `type`              | The type of database connection. Must be set to `"maxcompute"` for MaxCompute connections.                  | `"maxcompute"`             |
-| `project`           | The name of your MaxCompute project.                                                                        | **Required (no default)**  |
-| `endpoint`          | The endpoint URL used to connect to MaxCompute.                                                             | **Required (no default)**  |
-| `schema`            | The namespace schema that the models will use in MaxCompute.                                                | **Required (no default)**  |
-| `global_hints`      | Global SQL hints applied to all queries for optimization or compatibility.                                  | See below for defaults     |
-| `auth_type`         | Authentication method for accessing MaxCompute.                                                             | `"access_key"`             |
+| **Field**           | **Description**                                                                                             | **Default Value**                     |
+|---------------------|-------------------------------------------------------------------------------------------------------------|---------------------------------------|
+| `type`              | The type of database connection. Must be set to `"maxcompute"` for MaxCompute connections.                  | `"maxcompute"`                        |
+| `project`           | The name of your MaxCompute project.                                                                        | **Required (no default)**             |
+| `endpoint`          | The endpoint URL used to connect to MaxCompute.                                                             | **Required (no default)**             |
+| `schema`            | The namespace schema that the models will use in MaxCompute.                                                | **Required (no default)**             |
+| `auth_type`         | Authentication method for accessing MaxCompute.                                                             | `"access_key"`                        |
 | `access_key_id`     | Access ID used for authentication.                                                                          | **Required if using access key auth** |
 | `access_key_secret` | Access Key Secret used for authentication.                                                                  | **Required if using access key auth** |
-| Other auth options  | Alternative authentication methods such as STS. See [Authentication Configuration](docs/authentication.md). | **Varies by auth type** |
+| Other auth options  | Alternative authentication methods such as STS. See [Authentication Configuration](docs/authentication.md). | **Varies by auth type**               |
 
 > **Note**: Fields marked with "Required" must be explicitly specified in your configuration.
 
-**Global Hints**
+### Run your dbt models
+
+If you are new to DBT, we have prepared a [Tutorial document](docs/Tutorial.md) for your reference. Of course, you can also access the
+official documentation provided by DBT (but some additional adaptations may be required for MaxCompute)
+
+### Configure Your dbt Models
+
+You can customize dbt materialization behavior through model configurations. For general dbt configuration reference,
+see the official documentation: [dbt Model Configs](https://docs.getdbt.com/reference/model-configs).
+
+While dbt core provides native configurations like `materialized` and `sql_header`, this section focuses on
+**dbt-maxcompute specific configurations** that control table creation behavior during materialization.
+
+
+#### 🛠️ dbt-maxcompute Specific Configurations
+
+| Parameter                  | Type               | Default                | Description                                                                                                                                                                                                                                                                                                                          |
+|----------------------------|--------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **tblproperties**          | Map[String,String] | -                      | Additional table properties. Example: `{'table.format.version'='2'}` creates an Append2 table.                                                                                                                                                                                                                                       |
+| **transactional**          | Boolean            | `false`                | Equivalent to `tblproperties ('transactional' = 'true')`. Indicates whether to create a transactional table.                                                                                                                                                                                                                         |
+| **delta**                  | Boolean            | `false`                | Same to **transactional**, additional primary key validation.                                                                                                                                                                                                                                                                        |
+| **primary_keys**           | List[String]       | -                      | List of primary key column names (e.g., `['c1']`). Required when `delta=true`.                                                                                                                                                                                                                                                       |
+| **delta_table_bucket_num** | Integer            | `16`                   | Equivalent to `tblproperties ('write.bucket.num' = 'xx')`. Controls bucket count for Delta tables.                                                                                                                                                                                                                                   |
+| **partition_by**           | Map                | -                      | Defines partitioning strategy with two fields:<br>• `fields`: Comma-separated partition columns<br>• `data_types`: Optional data types (default: `string`). When specifying time types (`date`, `datetime`, `timestamp`), creates auto-partitioned tables.<br>Example: `{"fields": "name,some_date", "data_types": "string,string"}` |
+| **lifecycle**              | Integer            | -                      | Table retention period in days (e.g., `30` for 30-day lifecycle).                                                                                                                                                                                                                                                                    |
+| **sql_hints**              | Map[String,String] | See below for defaults | SQL hints applied to all queries for optimization or compatibility.                                                                                                                                                                                                                                                                  |
+
+**Default SQL Hints**
 
 MaxCompute supports global SQL hints to control query behavior and optimize performance. The following are the default global hints used by our system:
-
 ```yaml
 odps.sql.type.system.odps2: "true"
 odps.sql.decimal.odps2: "true"
@@ -102,15 +127,10 @@ odps.sql.submit.mode: "script"
 odps.sql.allow.cartesian: "true"
 odps.sql.timezone: "GMT"
 odps.sql.allow.schema.evolution: "true"
+odps.table.append2.enable": "true"
 ```
+You can override these defaults by specifying your own `sql_hints` use model config. Your custom hints will be merged with the defaults — you do not need to repeat the entire list unless you want to change specific values.
 
-You can override these defaults by specifying your own `global_hints` in the `profile.yml` file. Your custom hints will be merged with the defaults — you do not need to repeat the entire list unless you want to change specific values.
-
-
-### Run you dbt models
-
-If you are new to DBT, we have prepared a [Tutorial document](docs/Tutorial.md) for your reference. Of course, you can also access the
-official documentation provided by DBT (but some additional adaptations may be required for MaxCompute)
 
 ## Compatible dbt Packages for MaxCompute
 The following community-maintained dbt packages have been verified to work with dbt-maxcompute:

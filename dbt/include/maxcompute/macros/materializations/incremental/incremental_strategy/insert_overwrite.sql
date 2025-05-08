@@ -1,5 +1,5 @@
 {% macro mc_generate_incremental_insert_overwrite_build_sql(
-    tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists
+    tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists, tblproperties
 ) %}
     {% if partition_by is none %}
       {% set missing_partition_msg -%}
@@ -16,7 +16,7 @@
     {% endif %}
 
     {% set build_sql = mc_insert_overwrite_sql(
-        tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists
+        tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists, tblproperties
     ) %}
 
     {{ return(build_sql) }}
@@ -24,11 +24,11 @@
 {% endmacro %}
 
 {% macro mc_insert_overwrite_sql(
-    tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists
+    tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists, tblproperties
 ) %}
       {% if not tmp_relation_exists %}
         {%- call statement('create_tmp_relation') -%}
-          {{ create_table_as_internal(True, tmp_relation, sql, True, partition_config=partition_by) }}
+          {{ create_table_as_internal(True, tmp_relation, sql, True, partition_config=partition_by, tblproperties=tblproperties) }}
         {%- endcall -%}
       {% endif %}
       -- 3. run the merge statement
