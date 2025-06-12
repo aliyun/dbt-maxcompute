@@ -120,7 +120,6 @@ MaxCompute supports global SQL hints to control query behavior and optimize perf
 ```yaml
 odps.sql.type.system.odps2: "true"
 odps.sql.decimal.odps2: "true"
-odps.sql.hive.compatible: "true"
 odps.sql.allow.fullscan: "true"
 odps.sql.select.output.format: "csv"
 odps.sql.submit.mode: "script"
