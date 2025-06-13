@@ -83,6 +83,7 @@ Currently we support the following parameters：
 | `auth_type`         | Authentication method for accessing MaxCompute.                                                             | `"access_key"`                        |
 | `access_key_id`     | Access ID used for authentication.                                                                          | **Required if using access key auth** |
 | `access_key_secret` | Access Key Secret used for authentication.                                                                  | **Required if using access key auth** |
+| `timezone`          | The Timezone used for MaxCompute.                                                                           | `"GMT"`                               |
 | Other auth options  | Alternative authentication methods such as STS. See [Authentication Configuration](docs/authentication.md). | **Varies by auth type**               |
 
 > **Note**: Fields marked with "Required" must be explicitly specified in your configuration.
@@ -124,7 +125,6 @@ odps.sql.allow.fullscan: "true"
 odps.sql.select.output.format: "csv"
 odps.sql.submit.mode: "script"
 odps.sql.allow.cartesian: "true"
-odps.sql.timezone: "GMT"
 odps.sql.allow.schema.evolution: "true"
 odps.table.append2.enable": "true"
 ```

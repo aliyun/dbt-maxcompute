@@ -5,12 +5,14 @@ from alibabacloud_credentials.client import Client
 from alibabacloud_credentials.models import Config
 from dbt.adapters.contracts.connection import Credentials
 from odps import ODPS
+from odps import options
 from odps.accounts import CredentialProviderAccount
 
 
 @dataclass
 class MaxComputeCredentials(Credentials):
     endpoint: str
+    timezone: Optional[str] = None
 
     # auth config: All configuration items supported by alibabacloud_credentials
     # It should be noted that in order to avoid ambiguity,
@@ -99,4 +101,10 @@ class MaxComputeCredentials(Credentials):
             endpoint=self.endpoint,
         )
         o.schema = self.schema
+
+        if self.timezone:
+            options.local_timezone = self.timezone
+        else:
+            #  use UTC timezone if timezone is not set
+            options.local_timezone = False
         return o
