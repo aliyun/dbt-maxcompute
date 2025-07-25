@@ -12,6 +12,7 @@ from odps.accounts import CredentialProviderAccount
 @dataclass
 class MaxComputeCredentials(Credentials):
     endpoint: str
+    tunnel_endpoint: Optional[str] = None
     timezone: Optional[str] = None
 
     # auth config: All configuration items supported by alibabacloud_credentials
@@ -107,4 +108,7 @@ class MaxComputeCredentials(Credentials):
         else:
             #  use UTC timezone if timezone is not set
             options.local_timezone = False
+
+        if self.tunnel_endpoint:
+            options.tunnel.endpoint = self.tunnel_endpoint
         return o

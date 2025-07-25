@@ -84,6 +84,7 @@ Currently we support the following parameters：
 | `access_key_id`     | Access ID used for authentication.                                                                          | **Required if using access key auth** |
 | `access_key_secret` | Access Key Secret used for authentication.                                                                  | **Required if using access key auth** |
 | `timezone`          | The Timezone used for MaxCompute.                                                                           | `"GMT"`                               |
+| `tunnel_endpoint`   | The tunnel endpoint URL used to fetch result from MaxCompute.                                               | **Auto detected by endpoint**         |
 | Other auth options  | Alternative authentication methods such as STS. See [Authentication Configuration](docs/authentication.md). | **Varies by auth type**               |
 
 > **Note**: Fields marked with "Required" must be explicitly specified in your configuration.
