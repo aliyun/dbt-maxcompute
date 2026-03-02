@@ -50,7 +50,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.10'
 
       - name: Install python dependencies
         run: |
@@ -79,7 +79,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.10'
 
       - name: Install python dependencies
         run: |
@@ -127,7 +127,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14, windows-latest]
-        python-version: ['3.9', '3.10', '3.11', '3.12']
+        python-version: ['3.10', '3.11', '3.12', '3.13']
         dist-type: ["whl", "gz"]
 
     steps:
@@ -137,7 +137,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install python dependencies
-        # wheel 0.46.1 may build error in python 3.9,3.10,3.11 but ok in 3.12
         run: |
           python -m pip install --user --upgrade pip
           python -m pip install --upgrade wheel==0.45.1
