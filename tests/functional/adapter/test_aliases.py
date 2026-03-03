@@ -53,9 +53,6 @@ class TestSameAliasDifferentSchemasMaxCompute(BaseSameAliasDifferentSchemas):
     pass
 
 
-@pytest.mark.skip(
-    reason="The unstable case is not a problem with dbt-adapter, needs to be solved by server."
-)
 class TestSameAliasDifferentDatabasesMaxCompute(BaseSameAliasDifferentDatabases):
     @pytest.fixture(scope="class")
     def macros(self):

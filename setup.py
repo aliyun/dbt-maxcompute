@@ -2,9 +2,9 @@
 import sys
 
 # require a supported version of Python
-if sys.version_info < (3, 8):
+if sys.version_info < (3, 10):
     print("Error: dbt does not support this version of Python.")
-    print("Please upgrade to Python 3.8 or higher.")
+    print("Please upgrade to Python 3.10 or higher.")
     sys.exit(1)
 
 try:
@@ -51,12 +51,12 @@ setup(
     include_package_data=True,
     install_requires=[
         "dbt-common>=1.10,<2.0",
-        "dbt-adapters>=1.7,<2.0",
+        "dbt-adapters>=1.19.0,<2.0",
         "pyodps>=0.12.0",  # latest
         "alibabacloud_credentials>=0.3.6",  # latest
         "pandas>=0.17.0",
         # add dbt-core to ensure backwards compatibility of installation, this is not a functional dependency
-        "dbt-core>=1.8.0",
+        "dbt-core>=1.11.2",
     ],
     zip_safe=False,
     classifiers=[
@@ -65,10 +65,10 @@ setup(
         "Operating System :: Microsoft :: Windows",
         "Operating System :: MacOS :: MacOS X",
         "Operating System :: POSIX :: Linux",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
     ],
-    python_requires=">=3.9",
+    python_requires=">=3.10",
 )

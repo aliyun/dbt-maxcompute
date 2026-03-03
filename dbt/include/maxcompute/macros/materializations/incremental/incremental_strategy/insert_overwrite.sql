@@ -52,12 +52,21 @@
     WHERE {{ partition_by.render(False) }} in ({{ partitions | join(',') }})
     {%- endcall -%}
 
+    {% if partition_by.auto_partition() -%}
+    INSERT OVERWRITE TABLE {{ target }}
+    (
+    SELECT *
+    FROM {{ source }}
+    WHERE {{ partition_by.render(False) }} in ({{ partitions | join(',') }})
+    )
+    {%- else -%}
     INSERT OVERWRITE TABLE {{ target }} PARTITION({{ partition_by.render(False) }})
     (
     SELECT *
     FROM {{ source }}
     WHERE {{ partition_by.render(False) }} in ({{ partitions | join(',') }})
     )
+    {%- endif -%}
 {% endmacro %}
 
 {% macro mc_dynamic_insert_overwrite_sql(target, source, partition_by) -%}
