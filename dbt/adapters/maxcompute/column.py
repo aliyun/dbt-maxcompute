@@ -71,6 +71,7 @@ class MaxComputeColumn(Column):
             return True
         return lower in ["numeric", "decimal"]
 
+    @classmethod
     def string_type(cls, size: int = 0) -> str:
         return "string"
 

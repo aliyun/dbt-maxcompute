@@ -214,7 +214,7 @@ class MaxComputeAdapter(SQLAdapter):
             if is_schema_not_found(e):
                 return []
             else:
-                print("Raise! " + str(e))
+                logger.error(f"Error in list_relations_without_caching: {str(e)}")
                 raise e
 
     @classmethod

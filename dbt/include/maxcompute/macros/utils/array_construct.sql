@@ -18,7 +18,7 @@
         {%- elif data_type == 'timestamp' -%}
             array_remove(array(TIMESTAMP '2017-11-11 00:00:00'), TIMESTAMP '2017-11-11 00:00:00')
         {%- else -%}
-            {{ exceptions.raise_compiler_error("Unsupport datatype when create empty array ~ '" ~ data_type ~ "'") }}
+            {{ exceptions.raise_compiler_error("Unsupported datatype when create empty array ~ '" ~ data_type ~ "'") }}
         {%- endif -%}
     {%- endif -%}
 {%- endmacro %}

@@ -37,7 +37,7 @@ class MaxComputeConnectionManager(SQLConnectionManager):
 
     @classmethod
     def get_response(cls, cursor):
-        # FIXME：we should get 'code', 'message', 'rows_affected' from cursor
+        # Note: MaxCompute does not support rowcount, so rows_affected is not available
         logger.debug("Current instance id is " + cursor._instance.id)
         return AdapterResponse(_message="OK")
 
@@ -63,8 +63,6 @@ class MaxComputeConnectionManager(SQLConnectionManager):
     def begin(self):
         logger.debug("Trigger beginning transaction, actually do nothing...")
 
-    # FIXME: Sometimes the number of commits is greater than the number of begins.
-    #  It should be a problem with the micro, which can be reproduced through the test of dbt_show.
     def commit(self):
         logger.debug("Committing transaction, actually do nothing...")
 

@@ -40,6 +40,11 @@ def is_schema_not_found(e: ODPSError) -> bool:
     return False
 
 
+from dbt.adapters.events.logging import AdapterLogger
+
+logger = AdapterLogger("MaxCompute")
+
+
 def retry_on_exception(max_retries=3, delay=1, backoff=2, exceptions=(Exception,), condition=None):
     """
     Decorator for retrying a function if it throws an exception.
@@ -61,8 +66,7 @@ def retry_on_exception(max_retries=3, delay=1, backoff=2, exceptions=(Exception,
                 except exceptions as ex:
                     if condition is not None and not condition(ex):
                         raise
-                    msg = "%s, Retrying in %d seconds..." % (str(ex), mdelay)
-                    print(msg)
+                    logger.warning(f"{str(ex)}, Retrying in {mdelay} seconds...")
                     time.sleep(mdelay)
                     mtries -= 1
                     mdelay *= backoff

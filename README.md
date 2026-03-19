@@ -45,8 +45,8 @@ functionality and aiming for backwards compatibility.
 ### Install the plugin
 
 ```bash
-# we use conda and python 3.9 for this example
-conda create --name dbt-maxcompute-example python=3.9
+# we use conda and python 3.10 for this example
+conda create --name dbt-maxcompute-example python=3.10
 conda activate dbt-maxcompute-example
 
 pip install dbt-core
@@ -140,6 +140,16 @@ The following community-maintained dbt packages have been verified to work with 
 3. [dbt-expectations (MaxCompute Edition)](https://github.com/dingxin-tech/dbt-expectations)
 4. [elementary (MaxCompute Edition)](https://github.com/dingxin-tech/elementary)
 5. [dbt-project-evaluator (MaxCompute Edition)](https://github.com/dingxin-tech/dbt-project-evaluator)
+
+
+## Known Limitations
+
+Due to MaxCompute engine characteristics, the following limitations apply:
+
+| Limitation | Description |
+|------------|-------------|
+| **No rowcount support** | MaxCompute does not return the number of affected rows after DML operations. The `rows_affected` field in adapter responses will not be available. |
+| **No transaction support** | MaxCompute does not support traditional database transactions. `BEGIN`, `COMMIT`, and `ROLLBACK` operations are no-ops. |
 
 
 ## Developers Guide

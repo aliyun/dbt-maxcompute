@@ -1,5 +1,5 @@
 name: dbt_maxcompute
-version: 1.8.0
+version: 1.11.0
 config-version: 2
 
 macro-paths: ["macros"]
