@@ -131,3 +131,10 @@ dmypy.json
 
 # Idea
 .idea
+
+# Example dbt projects (committed sources, ignored runtime outputs)
+examples/**/profiles.yml
+examples/**/target/
+examples/**/logs/
+examples/**/dbt_packages/
+examples/**/.user.yml

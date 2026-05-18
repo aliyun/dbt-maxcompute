@@ -1,0 +1,24 @@
+# Copy this file to `profiles.yml` (same directory) and fill in your project.
+# `profiles.yml` is git-ignored so credentials never get committed.
+#
+# Auth uses environment variables — set them in your shell before running dbt:
+#   export ODPS_ACCESS_ID=...
+#   export ODPS_SECRET_ACCESS_KEY=...
+#
+# For an authoritative list of MaxCompute project endpoints see
+# https://www.alibabacloud.com/help/en/maxcompute/user-guide/endpoints
+
+maxcompute_showcase:
+  target: dev
+  outputs:
+    dev:
+      type: maxcompute
+      project: your_maxcompute_project       # required
+      schema: default                        # default schema inside the project
+      endpoint: http://service.cn-hangzhou.maxcompute.aliyun.com/api
+      auth_type: aliyun_access_key
+      access_id: "{{ env_var('ODPS_ACCESS_ID') }}"
+      secret_access_key: "{{ env_var('ODPS_SECRET_ACCESS_KEY') }}"
+      # threads: 4
+      # priority: 9                          # job priority, 0 (highest) - 9
+      # hints: { odps.sql.allow.fullscan: "true" }

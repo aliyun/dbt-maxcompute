@@ -1,0 +1,12 @@
+version: 2
+
+sources:
+  - name: raw
+    description: >
+      Seed-backed "raw" layer. In a real project this would point at an
+      upstream table loaded by DataWorks / Tunnel / a custom ingestion job.
+    schema: "{{ target.schema }}"
+    tables:
+      - name: orders
+        identifier: orders
+        description: Raw orders, one row per order, no history.

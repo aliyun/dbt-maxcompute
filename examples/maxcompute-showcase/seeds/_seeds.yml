@@ -1,0 +1,26 @@
+version: 2
+
+seeds:
+  - name: orders
+    description: >
+      Tiny synthetic orders dataset used by every model in the showcase.
+      Columns are explicitly typed so downstream `partition_by` examples
+      reference the right MaxCompute types (string, bigint, decimal,
+      datetime).
+    config:
+      column_types:
+        order_id: bigint
+        customer_id: bigint
+        country: string
+        amount: decimal(18, 2)
+        status: string
+        order_ts: datetime
+    columns:
+      - name: order_id
+        description: Surrogate key.
+        tests: [unique, not_null]
+      - name: country
+        description: ISO-2 country code, used as a static partition column.
+      - name: order_ts
+        description: Order timestamp, used as the source for date partitions
+          and the microbatch event_time.

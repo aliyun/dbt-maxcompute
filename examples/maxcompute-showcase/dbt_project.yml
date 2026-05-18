@@ -1,0 +1,38 @@
+name: maxcompute_showcase
+version: "1.0.0"
+config-version: 2
+
+profile: maxcompute_showcase
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+clean-targets:
+  - target
+  - dbt_packages
+  - logs
+
+# Default lifecycle for every model in this showcase so a forgotten teardown
+# does not accumulate cost. Individual models still override where it matters.
+models:
+  maxcompute_showcase:
+    +lifecycle: 1
+    01_partitioning:
+      +schema: showcase_partitioning
+    02_incremental:
+      +schema: showcase_incremental
+    03_materialized_view:
+      +schema: showcase_mv
+    04_operations:
+      +schema: showcase_ops
+
+seeds:
+  maxcompute_showcase:
+    +lifecycle: 1
+
+snapshots:
+  maxcompute_showcase:
+    +lifecycle: 1
