@@ -8,13 +8,6 @@
       {% do exceptions.raise_compiler_error(missing_partition_msg) %}
     {% endif %}
 
-    {% if partition_by.fields|length != 1 %}
-      {% set missing_partition_msg -%}
-      The 'insert_overwrite' strategy requires the `partition_by` config.
-      {%- endset %}
-      {% do exceptions.raise_compiler_error(missing_partition_msg) %}
-    {% endif %}
-
     {% set build_sql = mc_insert_overwrite_sql(
         tmp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, tmp_relation_exists, tblproperties
     ) %}
@@ -45,7 +38,7 @@
 
 {% macro mc_static_insert_overwrite_merge_sql(target, source, partition_by, partitions) -%}
     {%- set sql_header = config.get('sql_header', none) -%}
-    {{ sql_header if sql_header is not none and include_sql_header }}
+    {{ sql_header if sql_header is not none }}
 
     {%- call statement('drop_static_partition') -%}
     DELETE FROM {{ target }}
@@ -71,7 +64,7 @@
 
 {% macro mc_dynamic_insert_overwrite_sql(target, source, partition_by) -%}
     {%- set sql_header = config.get('sql_header', none) -%}
-    {{ sql_header if sql_header is not none and include_sql_header }}
+    {{ sql_header if sql_header is not none }}
     {% if partition_by.auto_partition() -%}
     INSERT OVERWRITE TABLE {{ target }}
     (
