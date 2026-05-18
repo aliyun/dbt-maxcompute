@@ -7,7 +7,7 @@
         substr(
         {{ string_text }},
         (length({{ string_text }})-cast({{ length_expression }} as int)+1),
-        length({{ string_text }})-1
+        cast({{ length_expression }} as int)
     )
     end
 
