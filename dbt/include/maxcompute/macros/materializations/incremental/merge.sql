@@ -69,19 +69,18 @@
 
     {% if unique_key %}
         {% if unique_key is sequence and unique_key is not string %}
-            delete from {{target }}
-            using {{ source }}
-            where (
-                {% for key in unique_key %}
-                    {{ source }}.{{ key }} = {{ target }}.{{ key }}
-                    {{ "and " if not loop.last}}
+            {#- MaxCompute DELETE does not support the PostgreSQL `using <src>`  -#}
+            {#- form. Use `(k1, k2, ...) in (select k1, k2, ... from src)`.     -#}
+            {%- set key_csv = unique_key | join(', ') -%}
+            delete from {{ target }}
+            where ({{ key_csv }}) in (
+                select {{ key_csv }} from {{ source }}
+            )
+            {%- if incremental_predicates %}
+                {% for predicate in incremental_predicates %}
+                    and {{ predicate }}
                 {% endfor %}
-                {% if incremental_predicates %}
-                    {% for predicate in incremental_predicates %}
-                        and {{ predicate }}
-                    {% endfor %}
-                {% endif %}
-            );
+            {%- endif -%};
         {% else %}
             delete from {{ target }}
             where (
