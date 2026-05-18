@@ -82,6 +82,16 @@
         incremental_strategy, temp_relation, target_relation, sql, unique_key, partition_by, partitions, dest_columns, temp_relation_exists, incremental_predicates, tblproperties
     ) %}
 
+    {#- For dbt-origin strategies (merge / delete+insert / append),               -#}
+    {#- mc_generate_incremental_build_sql creates the temp via its own            -#}
+    {#- `{% call statement('create_temp_relation') %}` block. Jinja scoping       -#}
+    {#- prevents that inner assignment from propagating, so we mark the flag here -#}
+    {#- to ensure the post-run cleanup drops it. insert_overwrite and microbatch  -#}
+    {#- emit their own `drop table if exists` in the generated SQL.               -#}
+    {%- if incremental_strategy not in ('insert_overwrite', 'microbatch') -%}
+        {% set temp_relation_exists = true %}
+    {%- endif -%}
+
     {% call statement("main") %}
       {{ sql_header if sql_header is not none }}
       {{ build_sql }}
