@@ -117,6 +117,35 @@
 {%- endmacro %}
 
 
+{% macro maxcompute__get_incremental_append_sql(arg_dict) -%}
+    {%- set target = arg_dict["target_relation"] -%}
+    {%- set source = arg_dict["temp_relation"] -%}
+    {%- set dest_columns = arg_dict["dest_columns"] -%}
+    {%- set dest_cols_csv = get_quoted_csv(dest_columns | map(attribute="name")) -%}
+    {%- set partition_config = adapter.parse_partition_by(config.get('partition_by', none)) -%}
+    {#- non-auto partition needs an explicit PARTITION clause; auto-partition  -#}
+    {#- derives the value server-side from a data column and dest_columns      -#}
+    {#- already excludes the generated column.                                 -#}
+    {%- set use_partition_clause = partition_config is not none and not partition_config.auto_partition() and partition_config.fields -%}
+
+    {% if use_partition_clause %}
+        {%- set partition_fields = partition_config.fields -%}
+        {%- set data_columns = dest_columns | rejectattr('name', 'in', partition_fields) | list -%}
+        {%- set data_cols_csv = get_quoted_csv(data_columns | map(attribute='name')) -%}
+        {%- set partition_cols_csv = get_quoted_csv(partition_fields) -%}
+    insert into {{ target }} partition ({{ partition_cols_csv }})
+    select {{ data_cols_csv }}, {{ partition_cols_csv }}
+    from {{ source }}
+    {% else %}
+    insert into {{ target }} ({{ dest_cols_csv }})
+    (
+        select {{ dest_cols_csv }}
+        from {{ source }}
+    )
+    {% endif %}
+{%- endmacro %}
+
+
 {% macro maxcompute__get_insert_overwrite_merge_sql(target, source, dest_columns, predicates, include_sql_header) -%}
     {#-- The only time include_sql_header is True: --#}
     {#-- BigQuery + insert_overwrite strategy + "static" partitions config --#}
