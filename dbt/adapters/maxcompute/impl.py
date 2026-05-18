@@ -36,6 +36,9 @@ from dbt.adapters.maxcompute.relation import MaxComputeRelation
 from dbt.adapters.events.logging import AdapterLogger
 
 from dbt.adapters.maxcompute.relation_configs._partition import PartitionConfig
+from dbt.adapters.maxcompute.relation_configs._materialized_view import (
+    MaxComputeMaterializedViewConfig,
+)
 from dbt.adapters.maxcompute.utils import is_schema_not_found, quote_string, quote_ref
 
 logger = AdapterLogger("MaxCompute")
@@ -105,6 +108,54 @@ class MaxComputeAdapter(SQLAdapter):
                 continue
         logger.warning(f"Table {relation.render()} does not exist.")
         return None
+
+    @available.parse_none
+    def materialized_view_config_changes(
+        self, existing_relation: MaxComputeRelation, relation_config
+    ) -> Optional[Dict[str, Any]]:
+        """Compare the new model config against the existing MV's persisted
+        metadata. Return None when they match (so dbt-core takes the refresh
+        path), or a non-empty dict describing what changed (so dbt-core takes
+        the apply/replace path).
+
+        We only diff fields that MaxCompute reliably reports back via
+        PyODPS — lifecycle, comment, disable_rewrite, partition fields.
+        Fields the user did not set (None in the new config) are ignored
+        so an unset value never drifts against the ODPS default.
+        """
+        table = self.get_odps_table_by_relation(existing_relation, 3)
+        if table is None:
+            # Existing relation vanished between cache build and check.
+            # Force the replace path so the MV gets re-created.
+            return {"missing": True}
+
+        new_config = MaxComputeMaterializedViewConfig.from_relation_config(relation_config)
+        existing_config = MaxComputeMaterializedViewConfig.from_dict(
+            MaxComputeMaterializedViewConfig.parse_mc_table(table)
+        )
+
+        changes: Dict[str, Any] = {}
+        if new_config.lifecycle is not None and new_config.lifecycle != existing_config.lifecycle:
+            changes["lifecycle"] = (existing_config.lifecycle, new_config.lifecycle)
+        if (
+            new_config.table_comment is not None
+            and new_config.table_comment != existing_config.table_comment
+        ):
+            changes["table_comment"] = (existing_config.table_comment, new_config.table_comment)
+        if new_config.disable_rewrite != existing_config.disable_rewrite:
+            changes["disable_rewrite"] = (
+                existing_config.disable_rewrite,
+                new_config.disable_rewrite,
+            )
+
+        new_pfields = tuple(new_config.partition_by.fields) if new_config.partition_by else ()
+        existing_pfields = (
+            tuple(existing_config.partition_by.fields) if existing_config.partition_by else ()
+        )
+        if new_pfields != existing_pfields:
+            changes["partition_by"] = (existing_pfields, new_pfields)
+
+        return changes or None
 
     ###
     # Implementations of abstract methods

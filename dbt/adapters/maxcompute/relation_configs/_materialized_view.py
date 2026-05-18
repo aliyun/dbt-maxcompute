@@ -46,6 +46,25 @@ class MaxComputeMaterializedViewConfig(MaxComputeBaseRelationConfig):
         return materialized_view
 
     @classmethod
+    def parse_mc_table(cls, table) -> Dict[str, Any]:
+        # Only fields that MaxCompute reliably reports back are populated.
+        # Anything we cannot read (tblProperties, build_deferred, column_comment, ...)
+        # is left as the dataclass default so it never falsely triggers a change.
+        schema_obj = table.get_schema()
+        partition_fields = [p.name for p in (table.table_schema.partitions or [])]
+        return {
+            "name": table.name,
+            "project": table.project.name,
+            "schema": schema_obj.name if schema_obj else "default",
+            "lifecycle": table.lifecycle if table.lifecycle and table.lifecycle > 0 else None,
+            "table_comment": table.comment or None,
+            "disable_rewrite": not table.is_materialized_view_rewrite_enabled,
+            "partition_by": (
+                {"fields": ",".join(partition_fields)} if partition_fields else None
+            ),
+        }
+
+    @classmethod
     def parse_relation_config(cls, relation_config: RelationConfig) -> Dict[str, Any]:
         config_dict = {
             "name": relation_config.identifier,
