@@ -146,14 +146,22 @@ class MaxComputeAdapter(SQLAdapter):
     def get_columns_in_relation(self, relation: MaxComputeRelation):
         logger.debug(f"get_columns_in_relation: {relation.render()}")
         odps_table = self.get_odps_table_by_relation(relation, 3)
-        return (
-            [
-                MaxComputeColumn.from_odps_column(column)
-                for column in odps_table.table_schema.simple_columns
-            ]
-            if odps_table
-            else []
-        )
+        if not odps_table:
+            return []
+        columns = [
+            MaxComputeColumn.from_odps_column(column)
+            for column in odps_table.table_schema.simple_columns
+        ]
+        # Include non-auto partition columns so callers that build INSERT/MERGE
+        # column lists (e.g. maxcompute__get_merge_sql) emit the partition field.
+        # Auto-partition columns (those with a generateExpression, e.g.
+        # trunc_time(...)) are derived by MaxCompute and must NOT appear in
+        # INSERT column lists.
+        for partition_column in odps_table.table_schema._partitions or []:
+            if getattr(partition_column, "_generate_expression", None):
+                continue
+            columns.append(MaxComputeColumn.from_odps_column(partition_column))
+        return columns
 
     def create_schema(self, relation: MaxComputeRelation) -> None:
         logger.debug(f"create_schema: '{relation.project}.{relation.schema}'")
