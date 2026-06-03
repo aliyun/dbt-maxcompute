@@ -85,6 +85,10 @@ Currently we support the following parameters：
 | `access_key_secret` | Access Key Secret used for authentication.                                                                  | **Required if using access key auth** |
 | `timezone`          | The Timezone used for MaxCompute.                                                                           | `"GMT"`                               |
 | `tunnel_endpoint`   | The tunnel endpoint URL used to fetch result from MaxCompute.                                               | **Auto detected by endpoint**         |
+| `execution_mode`    | SQL execution engine. `"offline"` uses the standard batch engine; `"maxqa"` routes queries through MaxQA (MCQA V2) for interactive acceleration. | `"offline"` |
+| `quota_name`        | Interactive quota group name for MaxQA. When omitted, the server returns a default connection (if available). | -                                     |
+| `maxqa_fallback`    | Enable server-side fallback to offline when MaxQA cannot handle a query (e.g. DDL).                         | `true`                                |
+| `maxqa_fallback_quota` | Offline quota group name used for fallback. When omitted, the server uses the project default.           | -                                     |
 | Other auth options  | Alternative authentication methods such as STS. See [Authentication Configuration](docs/authentication.md). | **Varies by auth type**               |
 
 > **Note**: Fields marked with "Required" must be explicitly specified in your configuration.
@@ -130,6 +134,61 @@ odps.sql.allow.schema.evolution: "true"
 odps.table.append2.enable": "true"
 ```
 You can override these defaults by specifying your own `sql_hints` use model config. Your custom hints will be merged with the defaults — you do not need to repeat the entire list unless you want to change specific values.
+
+### MaxQA (Interactive Query Acceleration)
+
+MaxQA (MCQA V2) is MaxCompute's interactive query acceleration engine. It provides significantly faster execution for suitable workloads — queries that take 30+ seconds in offline mode can often complete in under 5 seconds with MaxQA.
+
+#### Enable MaxQA in your profile
+
+```yaml
+my_profile:
+  target: dev
+  outputs:
+    dev:
+      type: maxcompute
+      project: my_project
+      schema: default
+      endpoint: http://service.cn-hangzhou.maxcompute.aliyun.com/api
+      access_key_id: "{{ env_var('ODPS_ACCESS_ID') }}"
+      access_key_secret: "{{ env_var('ODPS_SECRET_ACCESS_KEY') }}"
+      execution_mode: maxqa
+      quota_name: my_interactive_quota   # optional
+```
+
+When `execution_mode` is set to `maxqa`, all SQL is submitted through the MaxQA endpoint. By default, server-side fallback is enabled (`maxqa_fallback: true`), so DDL and complex queries that MaxQA cannot handle are automatically routed to the offline engine.
+
+#### Fallback configuration
+
+| Setting | Behavior |
+|---------|----------|
+| `maxqa_fallback: true` (default) | Server automatically falls back to offline for unsupported queries |
+| `maxqa_fallback: false` | No fallback — unsupported queries will fail |
+| `maxqa_fallback_quota: my_offline_quota` | Falls back to a specific offline quota group |
+
+#### Per-model override
+
+You can override the execution mode on individual models using `sql_hints`:
+
+```sql
+-- Force a heavy model to use offline, even when the profile default is maxqa
+{{ config(
+    materialized='table',
+    sql_hints={'dbt.execution_mode': 'offline'}
+) }}
+SELECT ...
+```
+
+```sql
+-- Use MaxQA for a specific model when the profile default is offline
+{{ config(
+    materialized='table',
+    sql_hints={'dbt.execution_mode': 'maxqa', 'dbt.quota_name': 'my_quota'}
+) }}
+SELECT ...
+```
+
+The `dbt.execution_mode` and `dbt.quota_name` hints are consumed by the adapter and never sent to MaxCompute.
 
 
 ## Compatible dbt Packages for MaxCompute

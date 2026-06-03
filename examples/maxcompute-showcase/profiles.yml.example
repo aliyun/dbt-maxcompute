@@ -11,6 +11,8 @@
 maxcompute_showcase:
   target: dev
   outputs:
+
+    # ── Standard offline mode ──────────────────────────────────────────
     dev:
       type: maxcompute
       project: your_maxcompute_project       # required
@@ -19,6 +21,21 @@ maxcompute_showcase:
       auth_type: aliyun_access_key
       access_id: "{{ env_var('ODPS_ACCESS_ID') }}"
       secret_access_key: "{{ env_var('ODPS_SECRET_ACCESS_KEY') }}"
-      # threads: 4
-      # priority: 9                          # job priority, 0 (highest) - 9
-      # hints: { odps.sql.allow.fullscan: "true" }
+
+    # ── MaxQA (MCQA V2) mode ──────────────────────────────────────────
+    # Submits SQL through the MaxQA interactive endpoint for faster
+    # execution. DDL/DML that MaxQA cannot handle is automatically
+    # fallen back to offline by the server (when maxqa_fallback is true).
+    dev_maxqa:
+      type: maxcompute
+      project: your_maxcompute_project
+      schema: default
+      endpoint: http://service.cn-hangzhou.maxcompute.aliyun.com/api
+      auth_type: aliyun_access_key
+      access_id: "{{ env_var('ODPS_ACCESS_ID') }}"
+      secret_access_key: "{{ env_var('ODPS_SECRET_ACCESS_KEY') }}"
+
+      execution_mode: maxqa                  # enable MaxQA
+      quota_name: your_interactive_quota     # optional — interactive quota group
+      # maxqa_fallback: true                 # default: true (server-side fallback)
+      # maxqa_fallback_quota: your_offline_q # optional — offline quota for fallback

@@ -28,6 +28,8 @@ models:
       +schema: showcase_mv
     04_operations:
       +schema: showcase_ops
+    05_maxqa:
+      +schema: showcase_maxqa
 
 seeds:
   maxcompute_showcase:
