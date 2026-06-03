@@ -15,6 +15,12 @@ class MaxComputeCredentials(Credentials):
     tunnel_endpoint: Optional[str] = None
     timezone: Optional[str] = None
 
+    # MaxQA (MCQA V2)
+    execution_mode: str = "offline"
+    quota_name: Optional[str] = None
+    maxqa_fallback: bool = True
+    maxqa_fallback_quota: Optional[str] = None
+
     # auth config: All configuration items supported by alibabacloud_credentials
     # It should be noted that in order to avoid ambiguity,
     # `type` becomes `auth_type`, `policy` becomes `auth_policy`, `host` becomes `auth_host`,
@@ -62,7 +68,7 @@ class MaxComputeCredentials(Credentials):
         return self.endpoint + "_" + self.database
 
     def _connection_keys(self):
-        return "project", "database", "schema", "endpoint"
+        return "project", "database", "schema", "endpoint", "execution_mode"
 
     def odps(self):
         if self.auth_type == "chain":

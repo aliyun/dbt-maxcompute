@@ -597,9 +597,33 @@ class MaxComputeAdapter(SQLAdapter):
             sql_hints = configs.get("sql_hints")
             if sql_hints:
                 hints.update(sql_hints)
-        inst = self.get_odps_client().execute_sql(
-            sql=sql, hints=hints, default_schema=default_schema
+
+        o = self.get_odps_client()
+        credentials = self.connections.get_thread_connection().credentials
+        model_mode = hints.pop("dbt.execution_mode", None)
+        model_quota = hints.pop("dbt.quota_name", None)
+        use_maxqa = (model_mode == "maxqa") or (
+            model_mode is None and credentials.execution_mode == "maxqa"
         )
+
+        if model_mode == "offline":
+            use_maxqa = False
+
+        if use_maxqa:
+            quota = model_quota or credentials.quota_name
+            fallback = credentials.maxqa_fallback
+            offline_quota = credentials.maxqa_fallback_quota
+            inst = o.execute_sql_interactive(
+                sql=sql,
+                hints=hints,
+                default_schema=default_schema,
+                use_mcqa_v2=True,
+                quota_name=quota,
+                fallback=fallback,
+                offline_quota_name=offline_quota,
+            )
+        else:
+            inst = o.execute_sql(sql=sql, hints=hints, default_schema=default_schema)
         logger.debug(f"Run raw sql: {sql}, instanceId: {inst.id}")
 
     @available

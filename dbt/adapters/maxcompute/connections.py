@@ -7,7 +7,7 @@ from dbt_common.exceptions import DbtConfigError, DbtRuntimeError
 from odps import options
 
 from dbt.adapters.maxcompute.context import GLOBAL_SQL_HINTS
-from dbt.adapters.maxcompute.wrapper import ConnectionWrapper
+from dbt.adapters.maxcompute.wrapper import ConnectionWrapper, MaxQAConfig
 
 logger = AdapterLogger("MaxCompute")
 
@@ -30,7 +30,15 @@ class MaxComputeConnectionManager(SQLConnectionManager):
         except Exception as e:
             raise DbtConfigError(f"Failed to connect to MaxCompute: {str(e)}") from e
 
-        handle = ConnectionWrapper(odps=o, hints=GLOBAL_SQL_HINTS)
+        maxqa_config = None
+        if credentials.execution_mode == "maxqa":
+            maxqa_config = MaxQAConfig(
+                quota_name=credentials.quota_name,
+                fallback=credentials.maxqa_fallback,
+                offline_quota_name=credentials.maxqa_fallback_quota,
+            )
+
+        handle = ConnectionWrapper(odps=o, hints=GLOBAL_SQL_HINTS, maxqa_config=maxqa_config)
         connection.state = "open"
         connection.handle = handle
         return connection
