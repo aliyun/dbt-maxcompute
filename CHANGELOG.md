@@ -5,6 +5,26 @@ All notable changes to `dbt-maxcompute` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.2] — 2026-06-03
+
+### Added
+
+- **MaxQA (MCQA V2) execution mode** — new profile-level `execution_mode: maxqa`
+  routes SQL through MaxCompute's interactive query acceleration engine,
+  delivering sub-second to single-digit-second latency for eligible
+  workloads. Supports optional `quota_name`, server-side fallback
+  (`maxqa_fallback`, default on), and fallback to a specific offline quota
+  (`maxqa_fallback_quota`). Per-model override via `sql_hints`:
+  `{'dbt.execution_mode': 'maxqa'}` / `{'dbt.execution_mode': 'offline'}`.
+  (`d35ab13`)
+- **MaxQA example models** in `examples/maxcompute-showcase/models/05_maxqa/`
+  — table, view, incremental, and force-offline demonstrations. (`1d4d96c`)
+
+### Fixed
+
+- **Ephemeral test assertions updated** for dbt-core 1.11.7's switch from
+  `CREATE VIEW` to `CREATE OR REPLACE VIEW`. (`f352841`)
+
 ## [1.11.1] — 2026-05-18
 
 Patch release that resolves a cluster of correctness bugs across the
