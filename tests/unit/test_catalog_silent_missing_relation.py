@@ -26,6 +26,7 @@ from dbt_common.exceptions import DbtRuntimeError
 from odps.errors import NoSuchObject, ODPSError
 
 from dbt.adapters.maxcompute import impl as mc_impl
+from dbt.adapters.maxcompute.credentials import MaxComputeCredentials
 from dbt.adapters.maxcompute.impl import MaxComputeAdapter
 from dbt.adapters.maxcompute.relation import MaxComputeRelation
 
@@ -159,3 +160,11 @@ def test_wrapped_internal_error_is_not_silent(monkeypatch):
     with pytest.raises(ODPSError):
         _catalog(adapter)
     assert sleep_records == []
+
+
+def test_profile_field_parses_into_credentials():
+    base = {"type": "maxcompute", "project": "p", "schema": "s",
+            "endpoint": "http://service.example.com/api"}
+    assert MaxComputeCredentials.from_dict(
+        dict(base, catalog_strict_metadata=True)).catalog_strict_metadata is True
+    assert MaxComputeCredentials.from_dict(base).catalog_strict_metadata is False
