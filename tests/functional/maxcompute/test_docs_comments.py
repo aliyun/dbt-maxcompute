@@ -14,6 +14,8 @@
 这样"注释挤进列定义"或"字面量被切开"会直接反映为断言失败。
 """
 
+import time
+
 import pytest
 from dbt.tests.util import get_artifact, run_dbt, run_dbt_and_capture
 
@@ -169,3 +171,85 @@ class TestPersistDocsCommentRoundTrip(DocsCommentsBase):
     def test_documented_column_missing_from_relation_warns(self, project):
         _, stdout = run_dbt_and_capture(["run", "--full-refresh"], expect_pass=True)
         assert "documented_but_absent" in stdout, "schema 里写了、库里没有的列应给出可见告警"
+
+
+# ---------------------------------------------------------------------------
+# The same read path feeds materialized-view configuration comparison, so a
+# comment containing characters MaxCompute escapes must not make every run look
+# like a config change. dbt's MV materialization takes REFRESH when detection
+# returns None and DROP+CREATE otherwise; `creation_time` is the witness
+# (REBUILD leaves it, a re-create bumps it).
+# ---------------------------------------------------------------------------
+
+_MV_SEED_CSV = """
+id,name
+1,Alice
+2,Bob
+""".lstrip()
+
+_MV_SCHEMA_YML = """
+version: 2
+sources:
+  - name: raw
+    schema: "{{ target.schema }}"
+    tables:
+      - name: src
+        identifier: mv_docs_src
+"""
+
+_MV_MODEL = """
+{{ config(
+    materialized='materialized_view',
+    lifecycle=1,
+    table_comment='物化视图注释 "dq" and \\'sq\\' with back\\\\slash'
+) }}
+select id, name from {{ source('raw', 'src') }}
+"""
+
+_MV_TABLE_COMMENT = """物化视图注释 "dq" and 'sq' with back\\slash"""
+
+
+class TestMaterializedViewCommentIsStable:
+    """`table_comment` with quotes / Chinese / backslash must not churn the MV."""
+
+    @pytest.fixture(scope="class")
+    def seeds(self):
+        return {"mv_docs_src.csv": _MV_SEED_CSV}
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {"mv_model.sql": _MV_MODEL, "mv_schema.yml": _MV_SCHEMA_YML}
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self):
+        return {"name": "mv_docs_comments"}
+
+    def _comment(self, project):
+        from dbt.adapters.maxcompute.relation import MaxComputeRelation
+
+        adapter = project.adapter
+        with adapter.connection_named("__test"):
+            relation = MaxComputeRelation.create(
+                database=project.database,
+                schema=project.test_schema,
+                identifier="mv_model",
+            )
+            table = adapter.get_odps_table_by_relation(relation, 3)
+            return table.comment, table.creation_time
+
+    def test_second_run_refreshes_instead_of_recreating(self, project):
+        run_dbt(["seed"])
+        run_dbt(["run"])
+        stored, created = self._comment(project)
+        print(f"MV table.comment as reported by metadata: {stored!r}")
+        assert created is not None
+
+        time.sleep(2)
+        run_dbt(["run"])
+        _, created_again = self._comment(project)
+        assert created == created_again, (
+            "MV was dropped and re-created although nothing changed: the comment "
+            f"stored by MaxCompute is read back as {stored!r} while the model sets "
+            f"{_MV_TABLE_COMMENT!r}, so configuration comparison must be looking at "
+            "an escaped value instead of the user's text."
+        )

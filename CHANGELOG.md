@@ -38,7 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set instead of failing inside the profile fixture with a `KeyError`. Added
   `tests/functional/maxcompute/test_docs_comments.py` (requires a real
   MaxCompute project) for the persist_docs switch, byte-exact comment
-  round-trips and column ordering.
+  round-trips, column ordering, and materialized-view comment stability
+  (a `table_comment` with quotes used to make every run look like a
+  configuration change, so the view was dropped and re-created).
 
 ## [1.11.3b3] — 2026-08-26
 
