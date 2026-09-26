@@ -153,6 +153,30 @@ odps.table.append2.enable": "true"
 ```
 You can override these defaults by specifying your own `sql_hints` use model config. Your custom hints will be merged with the defaults — you do not need to repeat the entire list unless you want to change specific values.
 
+#### Table and column comments (`persist_docs`)
+
+A `description` in a `.yml` file reaches MaxCompute metadata only when you enable
+`persist_docs` for that model, which is the same contract other adapters follow:
+
+```yaml
+models:
+  your_project:
+    +persist_docs:
+      relation: true   # table / view comment
+      columns: true    # column comments
+```
+
+MaxCompute specifics:
+
+- Tables and views are both supported. Materialized views are not: persisting
+  docs onto one raises instead of silently doing nothing.
+- Without `persist_docs` nothing is written for any materialization, so a `table`,
+  a `view` and a seed built from the same `.yml` end up with the same metadata.
+  Before, only `CREATE TABLE` carried the descriptions, so tables were the
+  exception.
+- Comment text round-trips as written — Chinese, double and single quotes,
+  newlines and backslashes — and `dbt docs generate` reports it back unchanged.
+
 ### MaxQA (Interactive Query Acceleration)
 
 MaxQA (MCQA V2) is MaxCompute's interactive query acceleration engine. It provides significantly faster execution for suitable workloads — queries that take 30+ seconds in offline mode can often complete in under 5 seconds with MaxQA.

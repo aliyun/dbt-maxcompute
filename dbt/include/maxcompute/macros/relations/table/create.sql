@@ -255,7 +255,13 @@ _dbt_maxframe_execute(_dbt_maxframe_sink)
                    {% endif %}
                {% endif %}
            {% endfor %}
-           {{ "COMMENT" }} {{ quote_and_escape(model_columns[c.name].description) }}
+           {#-- 注释只在用户打开 persist_docs.columns 时进 DDL。dbt 的契约是"描述要不要
+                落到仓库"由 persist_docs 决定；以前无条件写入，会让没开开关的表也带上
+                注释，上游 docs generate 用例因此一直对不上。 --#}
+           {% set column_comment = model_columns[c.name].description %}
+           {% if config.persist_column_docs() and column_comment %}
+              COMMENT {{ adapter.quote_string_literal(column_comment) }}
+           {% endif %}
         {%- endif %}
         {% set ns.needs_comma = true %}  {# 标记后续列需要逗号 #}
     {%- endif %}
@@ -263,8 +269,8 @@ _dbt_maxframe_execute(_dbt_maxframe_sink)
 {%- endmacro %}
 
 {% macro quote_and_escape(input_string) %}
-    {% set escaped_string = input_string | replace("'", "\\'") %}
-    '{{ escaped_string }}'
+    {#-- 转义规则只留一份：由适配器实现（含反斜杠本身），这里只做兼容转发。 --#}
+    {{ adapter.quote_string_literal(input_string) }}
 {% endmacro %}
 
 -- Compared to get_table_columns_and_constraints, only the surrounding brackets are deleted
