@@ -5,6 +5,23 @@ All notable changes to `dbt-maxcompute` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- New `catalog_strict_metadata` profile option (default `false`). When enabled,
+  `dbt docs generate` fails if a relation listed for the catalog stays unreadable
+  after the metadata retries; dbt-core records the failure in `catalog.json`
+  `errors`, making the gap visible to consumers of the artifact.
+
+### Fixed
+
+- `dbt docs generate` no longer drops unreadable relations from `catalog.json`
+  without naming them. Each skipped relation is now listed in a single warning
+  that explains the gap and how to opt into strict mode.
+- `get_odps_table_by_relation` retries now also cover `NoSuchObject` raised by the
+  metadata lookup itself, not only by reloading the returned object.
+
 ## [1.11.3b3] — 2026-08-26
 
 ### Fixed
