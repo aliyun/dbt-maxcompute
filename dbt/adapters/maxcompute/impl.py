@@ -491,7 +491,7 @@ class MaxComputeAdapter(SQLAdapter):
         return results
 
     def _report_catalog_dropped_relations(self, dropped_relations: List[str]) -> None:
-        """Surface relations that list surfaced but whose metadata stayed unreadable.
+        """Surface relations scheduled for the catalog whose metadata stayed unreadable.
 
         By default the catalog build still succeeds (unchanged exit semantics) but
         names every skipped relation in a warning. With `catalog_strict_metadata:
