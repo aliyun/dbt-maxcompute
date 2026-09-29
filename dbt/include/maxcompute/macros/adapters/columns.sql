@@ -1,3 +1,15 @@
+{# dbt-core's snapshot staging table calls the *dispatched* macro for the
+   target's columns when the snapshot uses `hard_deletes='new_record'`
+   (dbt/include/global_project/macros/materializations/snapshots/helpers.sql).
+   Without an implementation here, that option fails with
+   "get_columns_in_relation macro not implemented for adapter maxcompute" before
+   anything reaches MaxCompute.  The adapter already reads columns through pyodps,
+   so delegate instead of re-implementing the metadata query in SQL. -#}
+{% macro maxcompute__get_columns_in_relation(relation) -%}
+  {{ return(adapter.get_columns_in_relation(relation)) }}
+{%- endmacro %}
+
+
 {% macro maxcompute__alter_column_type(relation, column_name, new_column_type) -%}
     alter table {{ relation.render() }} change column {{ adapter.quote(column_name) }} {{ adapter.quote(column_name) }} {{ new_column_type }};
 {% endmacro %}

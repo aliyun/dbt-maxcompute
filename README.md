@@ -124,6 +124,10 @@ While dbt core provides native configurations like `materialized` and `sql_heade
 For Append and PK Delta Table creation with SQL `table` and `incremental` models, see
 [Delta Table support and configuration (中文)](docs/delta-tables.md).
 
+For `materialized='snapshot'`, see [Snapshot support on MaxCompute](docs/snapshot-support.md):
+which strategies and target tables hold history, how hard deletes are opted into, and
+which config keys the snapshot materialization does not apply.
+
 
 #### dbt-maxcompute Specific Configurations
 
@@ -390,6 +394,7 @@ Due to MaxCompute engine characteristics, the following limitations apply:
 |------------|-------------|
 | **No rowcount support** | MaxCompute does not return the number of affected rows after DML operations. The `rows_affected` field in adapter responses will not be available. |
 | **No transaction support** | MaxCompute does not support traditional database transactions. `BEGIN`, `COMMIT`, and `ROLLBACK` operations are no-ops. |
+| **Snapshots need a transactional, keyless target** | Expiring a snapshot version is a `MERGE INTO`, which MaxCompute runs only on transactional tables, and a key's expired version must coexist with its current version. A pre-existing plain table or a primary-key (PK Delta) table is rejected before the merge; see [Snapshot support](docs/snapshot-support.md). |
 
 
 ## Developers Guide
