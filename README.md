@@ -400,6 +400,11 @@ If you want to contribute or develop the adapter, use the following command to s
 pip install -r dev-requirements.txt
 ```
 
+Adapter behaviour that only a live MaxCompute project can decide (materialization
+SQL, incremental output, persisted docs, error propagation) is covered by the
+[SQL integration regression](docs/integration-tests.md). It runs on push and on
+demand, and reports a missing credential as blocked instead of as a pass.
+
 ## Reporting Bugs and Contributing
 
 Your feedback helps improve the project:

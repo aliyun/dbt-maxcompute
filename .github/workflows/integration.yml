@@ -1,0 +1,139 @@
+# **what?**
+# Runs the minimal real-SQL regression set (table / view / incremental / dbt
+# tests / persisted docs, plus an invalid-SQL case that must fail) against a
+# MaxCompute project, and makes "this run did not reach a server" visible
+# instead of green.
+#
+# **why?**
+# main.yml only covers unit tests and package installs, so adapter SQL
+# behaviour had no regression gate. Workflows triggered by a pull request from a
+# fork cannot read repository secrets, so that case has to be reported as *not
+# run* rather than as an integration pass.
+#
+# **when?**
+# Push to master/develop, any pull request, or manually. See
+# docs/integration-tests.md for the profile secret and for running it locally.
+
+name: SQL Integration Regression
+
+on:
+  push:
+    branches:
+      - "master"
+      - "develop"
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      keyword:
+        description: "pytest -k expression to narrow the run (optional)"
+        required: false
+        type: string
+        default: ""
+
+permissions: read-all
+
+# will cancel previous workflows triggered by the same event and for the same ref for PRs or same SHA otherwise
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ contains(github.event_name, 'pull_request') && github.event.pull_request.head.ref || github.sha }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  gate:
+    name: gate (are MaxCompute credentials available?)
+
+    runs-on: ubuntu-latest
+
+    outputs:
+      can_run: ${{ steps.decide.outputs.can_run }}
+
+    steps:
+      - name: Decide whether a real run is possible
+        id: decide
+        env:
+          DBT_PROFILE_YAML: ${{ secrets.DBT_PROFILE_YAML }}
+          IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          MUST_PRODUCE_EVIDENCE: ${{ github.event_name != 'pull_request' }}
+        run: |
+          set -uo pipefail
+          if [ "$IS_FORK_PR" = "true" ]; then
+            echo "can_run=false" >> "$GITHUB_OUTPUT"
+            {
+              echo ""
+              echo "## integration: NOT RUN"
+              echo ""
+              echo "- This pull request comes from a fork, so the workflow cannot read repository secrets."
+              echo "- No SQL reached a MaxCompute project. **This is not an integration pass.**"
+              echo "- A maintainer can run the same set from this workflow's *Run workflow* page."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "fork pull request: the integration job is skipped, and says so in the run summary"
+            exit 0
+          fi
+
+          if [ -z "$DBT_PROFILE_YAML" ]; then
+            echo "can_run=false" >> "$GITHUB_OUTPUT"
+            {
+              echo ""
+              echo "## integration: BLOCKED"
+              echo ""
+              echo "- The repository secret \`DBT_PROFILE_YAML\` is not configured, so no SQL ran."
+              echo "- **This is not an integration pass.** See docs/integration-tests.md."
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ "$MUST_PRODUCE_EVIDENCE" = "true" ]; then
+              echo "::error::integration blocked: DBT_PROFILE_YAML is not configured, so no evidence was produced"
+              exit 1
+            fi
+            echo "same-repo pull request without a configured profile: integration job will be skipped"
+            exit 0
+          fi
+
+          echo "can_run=true" >> "$GITHUB_OUTPUT"
+          echo "profile secret is available: the integration job will contact a MaxCompute project"
+
+  integration:
+    name: minimal SQL set (live MaxCompute project)
+
+    needs: gate
+
+    if: needs.gate.outputs.can_run == 'true'
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 40
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install python dependencies
+        run: |
+          python -m pip install --user --upgrade pip
+          python -m pip install --retries 5 -r dev-requirements.txt
+          python -m pip install --retries 5 -e .
+          python -m pip --version
+          dbt --version
+
+      - name: Prepare MaxCompute test profile
+        env:
+          DBT_PROFILE_YAML: ${{ secrets.DBT_PROFILE_YAML }}
+        run: |
+          test -n "$DBT_PROFILE_YAML"
+          profile_path="$RUNNER_TEMP/dbt_profile.yml"
+          printf '%s\n' "$DBT_PROFILE_YAML" > "$profile_path"
+          chmod 600 "$profile_path"
+          echo "DBT_PROFILE_PATH=$profile_path" >> "$GITHUB_ENV"
+
+      - name: Run the minimal SQL regression set
+        env:
+          DBT_INTEGRATION_KEYWORD: ${{ inputs.keyword }}
+        run: ./scripts/run-integration-tests.sh
