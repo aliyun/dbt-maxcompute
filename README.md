@@ -357,13 +357,29 @@ runtime. To avoid repeating `runtime_version` on every Python function, set
 
 
 ## Compatible dbt Packages for MaxCompute
-The following community-maintained dbt packages have been verified to work with dbt-maxcompute:
 
-1. [dbt-date (MaxCompute Edition)](https://github.com/dingxin-tech/dbt-date)
-2. [dbt-utils (MaxCompute Edition)](https://github.com/dingxin-tech/dbt-utils)
-3. [dbt-expectations (MaxCompute Edition)](https://github.com/dingxin-tech/dbt-expectations)
-4. [elementary (MaxCompute Edition)](https://github.com/dingxin-tech/elementary)
-5. [dbt-project-evaluator (MaxCompute Edition)](https://github.com/dingxin-tech/dbt-project-evaluator)
+"Compatible" is not a single state, so this table records the level we have evidence for, from a
+dbt-core 1.11.2 + dbt-maxcompute 1.11.3b3 run on 2026-09-25 against a three-tier MaxCompute project:
+
+* **build** — `dbt deps`, `dbt parse`, `dbt compile` and a real `dbt build` of representative models all ran green.
+* **partial** — installs and compiles, but at least one macro family fails once the SQL reaches MaxCompute.
+* **blocked** — `dbt build` stops early, so the package cannot be relied on end to end yet.
+
+| Package (MaxCompute Edition) | Level | What the 2026-09-25 run showed |
+|---|---|---|
+| [dbt-utils](https://github.com/dingxin-tech/dbt-utils) | build | `width_bucket`, `deduplicate`, `get_relations_by_pattern` and the generic tests all executed. |
+| [dbt-expectations](https://github.com/dingxin-tech/dbt-expectations) | build | `type_timestamp` plus the unique / in-set / of-type / stdev tests executed; the date-part coverage test works and reports real gaps. |
+| [dbt-date](https://github.com/dingxin-tech/dbt-date) | partial | Calendar macros (`day_of_week`, `week_start`, `iso_week_of_year`, `date_part`, `convert_timezone`) executed. The date-spine family (`get_base_dates`, `get_date_dimension`, fiscal macros) fails with `ODPS-0130161 invalid TIMESTAMP format` when a plain `YYYY-MM-DD` date is passed, because `maxcompute__get_base_dates` emits a `timestamp'YYYY-MM-DD'` literal without a time part. |
+| [elementary](https://github.com/dingxin-tech/elementary) | partial | Its own models and tests build; the `monitors_runs` view fails with `ODPS-0130071` because a DOUBLE value is written into the FLOAT-typed `execution_time` column. |
+| [dbt-project-evaluator](https://github.com/dingxin-tech/dbt-project-evaluator) | blocked | `stg_nodes` fails on the same DOUBLE/FLOAT conflict, which cascades to skip most of the package's models and tests. |
+| [dbt-data-reliability](https://github.com/dingxin-tech/dbt-data-reliability) | partial | Same `monitors_runs` failure as elementary. It also still depends on the upstream `dbt-labs/dbt_utils`, which has no MaxCompute dispatch and does not build here, so that dependency has to be repointed to the MaxCompute edition. |
+
+Two things to watch when installing these packages:
+
+* Several `packages.yml` files reference a branch (`revision: main`) instead of a tag, so a build is
+  only reproducible if you commit `package-lock.yml`; `dbt-data-reliability` has no release tag yet.
+* dbt needs a three-tier MaxCompute project (`project.schema.table`). On a two-tier project, `dbt build`
+  fails up front with `ODPS-0110061 Invalid database operations on two-tier model`.
 
 
 ## Known Limitations
