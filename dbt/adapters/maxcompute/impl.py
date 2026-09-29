@@ -26,12 +26,16 @@ from dbt.adapters.contracts.relation import RelationType
 from dbt.adapters.protocol import AdapterConfig
 from dbt.adapters.sql import SQLAdapter
 from dbt_common.contracts.constraints import ConstraintType
-from dbt_common.exceptions import DbtRuntimeError
+from dbt_common.exceptions import DbtRuntimeError, MacroArgTypeError
 from odps import ODPS
 from odps.errors import ODPSError, NoSuchObject
 
 from dbt.adapters.maxcompute import MaxComputeConnectionManager
-from dbt.adapters.maxcompute.column import MaxComputeColumn
+from dbt.adapters.maxcompute.column import (
+    CHAR_MAX_SIZE,
+    VARCHAR_MAX_SIZE,
+    MaxComputeColumn,
+)
 from dbt.adapters.maxcompute.relation import MaxComputeRelation
 from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.maxcompute.python_submissions import (
@@ -56,6 +60,20 @@ from dbt.adapters.maxcompute.utils import (
 )
 
 logger = AdapterLogger("MaxCompute")
+
+# How far the incremental/snapshot column-widening pass is allowed to go. `bounded` is the
+# default: a widening keeps the column's family and its declared bound. `widen` additionally
+# turns a bounded column into unbounded `string` when the incoming column has no bound --
+# the only way to keep such a value, and one MaxCompute cannot undo. `off` restores the
+# pre-fix behaviour of never touching the target schema.
+EXPAND_COLUMN_TYPES_BOUNDED = "bounded"
+EXPAND_COLUMN_TYPES_WIDEN = "widen"
+EXPAND_COLUMN_TYPES_OFF = "off"
+EXPAND_COLUMN_TYPES_MODES = {
+    EXPAND_COLUMN_TYPES_BOUNDED,
+    EXPAND_COLUMN_TYPES_WIDEN,
+    EXPAND_COLUMN_TYPES_OFF,
+}
 
 
 @dataclass
@@ -184,6 +202,81 @@ class MaxComputeAdapter(SQLAdapter):
         return AdapterResponse(_message="OK")
 
     @available.parse_none
+    def valid_snapshot_target(
+        self, relation: MaxComputeRelation, column_names: Optional[Dict[str, str]] = None
+    ) -> None:
+        """dbt calls this when the snapshot table already exists.
+
+        MaxCompute closes out an expired snapshot version with a ``merge into``,
+        and ``merge into`` only runs on a transactional table.  Checking the
+        table's own metadata here stops the run before the staging table is
+        built and names the property to change, instead of leaving the user
+        with a server error in the middle of the materialization.  See
+        ``docs/snapshot-support.md``.
+        """
+        super().valid_snapshot_target(relation, column_names)
+        table = self.get_odps_table_by_relation(relation)
+        # None means "this table's shape is not something we can read"
+        # (external table, view, older pyodps).  Unknown is not a reason to
+        # reject a target the user may well be able to snapshot.
+        transactional = getattr(table, "is_transactional", None) if table else None
+        if transactional is False:
+            raise DbtRuntimeError(
+                f"Snapshot target {relation.render()} is a non-transactional "
+                "MaxCompute table. dbt keeps snapshot history by merging "
+                "expired versions, and MERGE INTO only runs on transactional "
+                "tables, so this target cannot hold snapshot history. Drop it "
+                "and let dbt create the snapshot table (dbt creates it "
+                "transactional), or recreate it with "
+                'TBLPROPERTIES("transactional"="true").'
+            )
+        # A primary key on the *data* collides with snapshot history: the
+        # expired version and the new current version of one unique key have to
+        # coexist, and an upsert-by-key merge replaces the row instead of adding
+        # the second version, which leaves the record with no current version at
+        # all (measured on a live project).  A key on the snapshot's own version
+        # id is harmless - that column is already unique per version - so only
+        # the data-column case is refused.
+        # Leftover staging helper columns: the pre-fix materialization could add
+        # dbt_change_type / dbt_unique_key_1/2 to the snapshot table itself, and
+        # such a table can never be snapshotted again - the staging query aliases
+        # those same names over `select *` and MaxCompute refuses it as ambiguous.
+        # Refuse it with the one-line remedy instead of that error storm.
+        # One metadata read: the table object we already fetched carries the
+        # columns, so the leftover check does not need a second query.
+        table_columns = getattr(getattr(table, "table_schema", None), "columns", None) or []
+        leftover = [
+            str(column.name)
+            for column in table_columns
+            if str(column.name).lower() == "dbt_change_type"
+            or str(column.name).lower().startswith("dbt_unique_key")
+        ]
+        if leftover:
+            raise DbtRuntimeError(
+                f"Snapshot target {relation.render()} contains staging columns "
+                f"({', '.join(leftover)}), which an older version of this adapter "
+                "could add to a snapshot table. They make every later run fail with "
+                '"column ... is ambiguous" inside MaxCompute. Drop those columns '
+                "(`alter table ... drop columns`) or move the snapshot to a new "
+                "target; current versions no longer add them."
+            )
+        primary_key = getattr(table, "primary_key", None) if table else None
+        scd_id = (column_names or {}).get("dbt_scd_id", "dbt_scd_id").lower()
+        colliding = [
+            str(column).lower() for column in (primary_key or []) if str(column).lower() != scd_id
+        ]
+        if colliding:
+            raise DbtRuntimeError(
+                f"Snapshot target {relation.render()} has a primary key "
+                f"({', '.join(colliding)}). A snapshot keeps the expired version "
+                "and the current version of one unique key side by side, which "
+                "that key forbids: MaxCompute merges by key and the record ends "
+                "up with no current version. Let dbt create the snapshot table "
+                "(it creates one without a primary key), or point the snapshot "
+                "at a different target with the 'to' config."
+            )
+
+    @available.parse_none
     def get_odps_table_by_relation(
         self, relation: MaxComputeRelation, retry_times=1
     ) -> Optional[odps.models.Table]:
@@ -296,8 +389,16 @@ class MaxComputeAdapter(SQLAdapter):
         odps_table = self.get_odps_table_by_relation(relation, 3)
         if not odps_table:
             return []
+        # A primary key or a partition column cannot be re-typed on MaxCompute, so the
+        # columns carrying those roles are recorded: the widening pass must leave them
+        # alone instead of submitting a DDL the server rejects.
+        primary_keys = {
+            str(name).lower() for name in (getattr(odps_table, "primary_key", None) or [])
+        }
         columns = [
-            MaxComputeColumn.from_odps_column(column)
+            MaxComputeColumn.from_odps_column(
+                column, is_primary_key=column.name.lower() in primary_keys
+            )
             for column in odps_table.table_schema.simple_columns
         ]
         # Include non-auto partition columns so callers that build INSERT/MERGE
@@ -308,8 +409,122 @@ class MaxComputeAdapter(SQLAdapter):
         for partition_column in odps_table.table_schema._partitions or []:
             if getattr(partition_column, "_generate_expression", None):
                 continue
-            columns.append(MaxComputeColumn.from_odps_column(partition_column))
+            columns.append(MaxComputeColumn.from_odps_column(partition_column, is_partition=True))
         return columns
+
+    @classmethod
+    def _widened_string_type(
+        cls, target: MaxComputeColumn, source: MaxComputeColumn, mode: str
+    ) -> Optional[str]:
+        # (mode constants and what they mean are declared next to `logger`, above)
+        """The type to widen `target` to so `source` fits, or None to keep it as declared.
+
+        `can_expand_to` already decided that a widening is needed and allowed; this picks
+        how far the model's `expand_column_types` mode lets it go.
+        """
+        if not target.can_expand_to(source):
+            return None
+        source_size = source.declared_size()
+        if source_size is None:
+            # Unbounded incoming column. The only widening that can hold an unknown
+            # length is dropping the declared bound, and MaxCompute cannot put that
+            # bound back (`string -> varchar(n)` is rejected) -- so it is opt-in, not the
+            # default, and the caller reports the truncation when the model declines.
+            return "string" if mode == EXPAND_COLUMN_TYPES_WIDEN else None
+        # Stay inside the declared family while that family can still hold the width:
+        # `char(n)` and `varchar(n)` are not interchangeable for the values a column
+        # already contains.
+        if target.dtype.lower().startswith("char") and source_size <= CHAR_MAX_SIZE:
+            return f"char({source_size})"
+        if source_size > VARCHAR_MAX_SIZE:
+            return "string" if mode == EXPAND_COLUMN_TYPES_WIDEN else None
+        return f"varchar({source_size})"
+
+    @classmethod
+    def _widening_decline_reason(
+        cls, target: MaxComputeColumn, source: MaxComputeColumn, mode: str
+    ) -> Optional[str]:
+        """Why a column that will truncate was left alone, phrased for a log line."""
+        blocked = target.widening_blocked_because()
+        if blocked is not None:
+            return f"MaxCompute will not re-type it because {blocked}"
+        if mode == EXPAND_COLUMN_TYPES_BOUNDED and (
+            source.declared_size() is None or source.declared_size() > VARCHAR_MAX_SIZE
+        ):
+            return (
+                "the model keeps its declared width (expand_column_types='bounded' is the "
+                "default; set it to 'widen' to give the column up instead of the value)"
+            )
+        return None
+
+    @available.parse_none
+    def expand_target_column_types(
+        self, from_relation, to_relation, mode: str = EXPAND_COLUMN_TYPES_BOUNDED
+    ) -> None:
+        """Widen `to_relation`'s string columns so merging `from_relation` in fits.
+
+        dbt-core runs this pass before an incremental append, a merge, and a snapshot
+        upsert. On MaxCompute it is the only place a guard can still work: an over-long
+        value inserted into a `varchar(n)` column *succeeds* and keeps n characters, so
+        once the insert has run, the data is gone. Narrowing is not a risk to guard
+        against here -- the server rejects a `change column` that could lose characters
+        -- which is why a widening can be submitted without asking first.
+
+        `expand_column_types` on the model chooses how far to go:
+
+        * `bounded` (default) -- widen inside the declared family, and keep the bound;
+        * `widen` -- also give the bound up to unbounded `string` when the incoming
+          column has no bound, which is the only way to keep such a value;
+        * `off` -- leave the target schema alone (the pre-fix behaviour).
+
+        A declined widening is not a silent one: the column is named in a warning, with
+        the value length it cannot hold.
+
+        Columns the server will not re-type (primary key, partition) are skipped, not
+        attempted: a rejected DDL would fail a run that is green today. They are reported
+        instead, because the alternative is losing characters without a word.
+        """
+        if mode not in EXPAND_COLUMN_TYPES_MODES:
+            raise DbtRuntimeError(
+                "`expand_column_types` must be one of: {}".format(
+                    ", ".join(sorted(EXPAND_COLUMN_TYPES_MODES))
+                )
+            )
+        if mode == EXPAND_COLUMN_TYPES_OFF:
+            return
+        for relation_name, relation in (
+            ("from_relation", from_relation),
+            ("to_relation", to_relation),
+        ):
+            if not isinstance(relation, self.Relation):
+                raise MacroArgTypeError(
+                    method_name="expand_target_column_types",
+                    arg_name=relation_name,
+                    got_value=relation,
+                    expected_type=self.Relation,
+                )
+        incoming = {c.name.lower(): c for c in self.get_columns_in_relation(from_relation)}
+        targets = {c.name.lower(): c for c in self.get_columns_in_relation(to_relation)}
+        for name, source_column in incoming.items():
+            target_column = targets.get(name)
+            if target_column is None:
+                continue  # a new column: `on_schema_change` is the one that adds it
+            new_type = self._widened_string_type(target_column, source_column, mode)
+            if new_type:
+                logger.info(
+                    f"Widening {to_relation.render()} column {target_column.name} "
+                    f"from {target_column.dtype} to {new_type}"
+                )
+                self.alter_column_type(to_relation, target_column.name, new_type)
+                continue
+            if not target_column.will_truncate(source_column):
+                continue  # it fits, so there is nothing to report
+            reason = self._widening_decline_reason(target_column, source_column, mode)
+            if reason:
+                logger.warning(
+                    f"{to_relation.render()}: "
+                    f"{target_column.widening_notice(source_column, reason)}"
+                )
 
     def create_schema(self, relation: MaxComputeRelation) -> None:
         logger.debug(f"create_schema: '{relation.project}.{relation.schema}'")

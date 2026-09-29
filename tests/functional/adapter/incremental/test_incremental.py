@@ -9,25 +9,49 @@ from dbt.tests.adapter.incremental.test_incremental_on_schema_change import (
     BaseIncrementalOnSchemaChange,
 )
 from dbt.tests.adapter.incremental.test_incremental_microbatch import BaseMicrobatch
-from dbt.tests.util import run_dbt
 
 
 class TestMergeExcludeColumnsMaxCompute(BaseMergeExcludeColumns):
     pass
 
 
-_input_model_sql = """
+_mc_input_model_sql = """
 {{ config(materialized='table', event_time='event_time') }}
-select 1 as id, TIMESTAMP'2024-12-30 00:00:00' as event_time
+select 1 as id, TIMESTAMP'2020-01-01 00:00:00' as event_time
 union all
-select 2 as id, TIMESTAMP'2024-12-31 00:00:00' as event_time
+select 2 as id, TIMESTAMP'2020-01-02 00:00:00' as event_time
 union all
-select 3 as id, TIMESTAMP'2025-01-01 00:00:00' as event_time
+select 3 as id, TIMESTAMP'2020-01-03 00:00:00' as event_time
+"""
+
+# MaxCompute's microbatch strategy requires a `partition_by` whose granularity equals
+# `batch_size` (see `mc_validate_microbatch_config`), because a batch is written by
+# overwriting the partitions its rows touch. Upstream's fixture has no `partition_by`,
+# so it is overridden here; the literals use MaxCompute's `TIMESTAMP'...'` spelling.
+_mc_microbatch_model_sql = """
+{{ config(
+    materialized='incremental',
+    incremental_strategy='microbatch',
+    unique_key='id',
+    event_time='event_time',
+    batch_size='day',
+    begin=modules.datetime.datetime(2020, 1, 1, 0, 0, 0),
+    partition_by={'field': 'event_time', 'data_type': 'timestamp', 'granularity': 'day'}
+) }}
+select * from {{ ref('input_model') }}
 """
 
 
-@pytest.mark.skip(reason="MaxCompute Api not support freeze time.")
 class TestMicrobatchMaxCompute(BaseMicrobatch):
+    """Upstream's microbatch contract, executed against the real service.
+
+    This class used to be skipped with `MaxCompute Api not support freeze time`. That
+    reason does not hold: since dbt-core 1.9 the test helper patches
+    `MicrobatchBuilder.build_end_time` in the dbt process (`dbt.tests.util`), it does not
+    ask the warehouse for a frozen clock, and `--event-time-start/--event-time-end` give
+    the same control without any patching at all. What MaxCompute actually needs is the
+    dialect-specific fixtures below.
+    """
 
     @pytest.fixture(scope="class")
     def input_model_sql(self) -> str:
@@ -35,10 +59,21 @@ class TestMicrobatchMaxCompute(BaseMicrobatch):
         This is the SQL that defines the input model to the microbatch model, including any {{ config(..) }}.
         event_time is a required configuration of this input
         """
-        return _input_model_sql
+        return _mc_input_model_sql
 
-    def test_run_with_event_time(self, project, insert_two_rows_sql):
-        run_dbt(["run"])
+    @pytest.fixture(scope="class")
+    def microbatch_model_sql(self) -> str:
+        return _mc_microbatch_model_sql
+
+    @pytest.fixture(scope="class")
+    def insert_two_rows_sql(self, project) -> str:
+        test_schema_relation = project.adapter.Relation.create(
+            database=project.database, schema=project.test_schema
+        )
+        return (
+            f"insert into {test_schema_relation}.input_model (id, event_time) values "
+            "(4, TIMESTAMP'2020-01-04 00:00:00'), (5, TIMESTAMP'2020-01-05 00:00:00')"
+        )
 
 
 class TestIncrementalOnSchemaChange(BaseIncrementalOnSchemaChange):
