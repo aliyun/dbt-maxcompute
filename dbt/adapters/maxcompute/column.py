@@ -96,6 +96,18 @@ class MaxComputeColumn(Column):
             return f"varchar({int(size)})"
         return "string"
 
+    @property
+    def data_type(self) -> str:
+        # The base implementation supplies string_size()'s fallback of 256 for
+        # unbounded strings. Preserve the metadata type when emitting DDL.
+        if self.is_string():
+            size = self.declared_size()
+            if size is None:
+                return "string"
+            family = "char" if self.dtype.lower().startswith("char") else "varchar"
+            return f"{family}({size})"
+        return super().data_type
+
     def declared_size(self) -> Optional[int]:
         """The width this column actually declares, or None when it is unbounded.
 

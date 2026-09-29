@@ -151,3 +151,20 @@ class _SelfStub:
 
     def get_columns_in_relation(self, relation):
         return []
+
+@pytest.mark.parametrize(
+    "dtype,expected",
+    [
+        ("string", "string"),
+        ("varchar(20)", "varchar(20)"),
+        ("char(5)", "char(5)"),
+        ("bigint", "bigint"),
+    ],
+)
+def test_metadata_column_type_is_preserved_in_snapshot_ddl(dtype, expected):
+    from odps.models import TableSchema
+
+    metadata = TableSchema.from_lists(["value"], [dtype]).columns[0]
+    col = MaxComputeColumn.from_odps_column(metadata)
+    assert col.data_type == expected
+    assert col.literal("'" + "x" * 300 + "'").endswith(f" as {expected})")
