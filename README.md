@@ -141,6 +141,7 @@ which config keys the snapshot materialization does not apply.
 | **partition_by**           | Map                | -                      | Defines partitioning strategy with two fields:<br>• `fields`: Comma-separated partition columns<br>• `data_types`: Optional data types (default: `string`). When specifying time types (`date`, `datetime`, `timestamp`), creates auto-partitioned tables.<br>Example: `{"fields": "name,some_date", "data_types": "string,string"}` |
 | **lifecycle**              | Integer            | -                      | Table retention period in days (e.g., `30` for 30-day lifecycle).                                                                                                                                                                                                                                                                    |
 | **sql_hints**              | Map[String,String] | See below for defaults | SQL hints applied to all queries for optimization or compatibility.                                                                                                                                                                                                                                                                  |
+| **expand_column_types**    | String             | `bounded`              | How far an incremental or snapshot run may widen a declared `varchar`/`char` column to fit the incoming values: `bounded` (keep the declared width and report what will be truncated), `widen` (also give the width up to unbounded `string`, which MaxCompute cannot undo), or `off` (never change the target schema). Contract-enforced models are skipped. |
 
 **Default SQL Hints**
 
@@ -156,6 +157,32 @@ odps.sql.allow.schema.evolution: "true"
 odps.table.append2.enable": "true"
 ```
 You can override these defaults by specifying your own `sql_hints` use model config. Your custom hints will be merged with the defaults — you do not need to repeat the entire list unless you want to change specific values.
+
+### Model Hooks
+
+`pre-hook` and `post-hook` statements run as ordinary MaxCompute SQL jobs.
+MaxCompute has no transactions, so a hook's `transaction` flag does not open or
+close one -- it decides the order the hooks run in, exactly as on other adapters:
+`transaction: false` pre-hooks run before the rest, and `transaction: false`
+post-hooks run after them, once the scratch relations are gone.
+
+```yaml
+models:
+  my_project:
+    pre-hook:
+      - sql: "insert into dbt_hook_audit values ('first, outside')"
+        transaction: false
+      - "insert into dbt_hook_audit values ('then, inside')"
+    post-hook:
+      - "insert into dbt_hook_audit values ('first, inside')"
+      - sql: "insert into dbt_hook_audit values ('last, outside')"
+        transaction: false
+```
+
+dbt-core's `before_begin()` / `in_transaction()` / `after_commit()` helper macros
+produce the same shape and behave the same way here. A hook is only visible to
+later statements once its own job finishes -- there is no rollback point, so a
+failing model leaves whatever its earlier hooks already wrote.
 
 ### MaxQA (Interactive Query Acceleration)
 
@@ -394,6 +421,9 @@ Due to MaxCompute engine characteristics, the following limitations apply:
 |------------|-------------|
 | **No rowcount support** | MaxCompute does not return the number of affected rows after DML operations. The `rows_affected` field in adapter responses will not be available. |
 | **No transaction support** | MaxCompute does not support traditional database transactions. `BEGIN`, `COMMIT`, and `ROLLBACK` operations are no-ops. |
+| **No index DDL** | MaxCompute has no `CREATE INDEX`. dbt accepts an `indexes:` config but the adapter never applies it, so models that rely on it get no index and no warning. |
+| **Incremental full refresh is not atomic** | `dbt run --full-refresh` on an incremental SQL model drops the existing table and rebuilds it in place, instead of building a scratch relation and renaming. A build that fails midway leaves the previous version gone. |
+| **Declared-width columns are widened before an incremental write** | MaxCompute truncates an over-long value on insert without failing the job, so dbt-core's column-widening pass has to run *before* the merge, and it now does: `adapter.expand_target_column_types` submits `alter table ... change column` and the target keeps the incoming value. Two kinds of column are left alone because MaxCompute refuses to re-type them at all -- primary key and partition columns -- and a column that keeps a declared width against an unbounded `string` source; both are reported in the run log instead of losing characters quietly. Set `expand_column_types` on a model to choose: `bounded` (default) never drops a declared width, `widen` also turns such a column into unbounded `string` so no value can be lost, `off` restores the previous behaviour of never touching the target schema. Widening cannot be undone: MaxCompute rejects `string -> varchar(n)`. |
 | **Snapshots need a transactional, keyless target** | Expiring a snapshot version is a `MERGE INTO`, which MaxCompute runs only on transactional tables, and a key's expired version must coexist with its current version. A pre-existing plain table or a primary-key (PK Delta) table is rejected before the merge; see [Snapshot support](docs/snapshot-support.md). |
 
 

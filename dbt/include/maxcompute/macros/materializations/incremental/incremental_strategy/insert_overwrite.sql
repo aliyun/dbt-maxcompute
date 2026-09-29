@@ -24,6 +24,11 @@
           {{ create_table_as_internal(True, tmp_relation, sql, True, partition_config=partition_by, tblproperties=tblproperties) }}
         {%- endcall -%}
       {% endif %}
+      {#-- insert_overwrite (and microbatch, which reuses this macro) overwrite whole
+           partitions, but the values still land in the target's declared columns and
+           are still cut down to fit them -- so widen first, here, where the temp
+           relation exists and nothing has been written yet. --#}
+      {% do mc_expand_target_column_types(tmp_relation, target_relation) %}
       -- 3. run the merge statement
       {%- call statement('main') -%}
       {% if partitions is not none and partitions != [] %} {# static #}

@@ -76,7 +76,14 @@
   {{ drop_relation_if_exists(preexisting_intermediate_relation) }}
   {{ drop_relation_if_exists(preexisting_backup_relation) }}
 
-  {{ run_hooks(pre_hooks) }}
+  {#-- Two passes per phase, as in dbt-core: run_hooks() keeps only the hooks #}
+  {#-- whose `transaction` flag matches the pass, so calling it once with its #}
+  {#-- default argument skipped every `transaction: false` hook -- which is   #}
+  {#-- what core's before_begin() and after_commit() helpers produce.         #}
+  {#-- MaxCompute has no transactions (connections.begin()/commit() are       #}
+  {#-- no-ops), so the two passes pick hooks and fix their order only.        #}
+  {{ run_hooks(pre_hooks, inside_transaction=False) }}
+  {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
   {% if existing_relation is none %}
     {% if language == 'python' %}
@@ -189,6 +196,11 @@
         {%- endcall -%}
       {% endif %}
       {% set temp_relation_exists = true %}
+      {#-- Widen the target's declared string columns before anything reads the temp
+           relation: MaxCompute keeps the first n characters of a longer value on
+           insert instead of failing, so this is the last point where the data can be
+           saved. `mc_expand_target_column_types` explains why contract models opt out. --#}
+      {% do mc_expand_target_column_types(temp_relation, target_relation) %}
       {#-- Process schema changes. Returns dict of changes if successful. Use source columns for upserting/merging --#}
       {% set dest_columns = process_schema_changes(on_schema_change, temp_relation, existing_relation) %}
     {% endif %}
@@ -226,7 +238,7 @@
 
   {% do persist_docs(target_relation, model) %}
 
-  {{ run_hooks(post_hooks) }}
+  {{ run_hooks(post_hooks, inside_transaction=True) }}
 
   {%- if did_python_full_refresh_swap -%}
     {{ drop_relation_if_exists(backup_relation) }}
@@ -235,6 +247,10 @@
   {%- if temp_relation_exists -%}
     {{ adapter.drop_relation(temp_relation) }}
   {%- endif -%}
+
+  {#-- Outside-transaction post hooks run last, after the scratch relations #}
+  {#-- are gone -- same position as dbt-core.                              #}
+  {{ run_hooks(post_hooks, inside_transaction=False) }}
 
   {{ return({'relations': [target_relation]}) }}
 {%- endmaterialization %}
@@ -256,6 +272,9 @@
           {{ create_table_as_internal(True, temp_relation, sql, True, partition_config=partition_by, tblproperties=tblproperties) }}
       {% endif %}
     {%- endcall -%}
+    {#-- Same widening as above, at the point the strategies that build their own temp
+         (merge / delete+insert / append) have one. --#}
+    {% do mc_expand_target_column_types(temp_relation, target_relation) %}
     {% set strategy_sql_macro_func = adapter.get_incremental_strategy_macro(context, strategy) %}
     {% set strategy_arg_dict = ({'target_relation': target_relation, 'temp_relation': temp_relation, 'unique_key': unique_key, 'dest_columns': dest_columns, 'incremental_predicates': incremental_predicates }) %}
     {% set build_sql = strategy_sql_macro_func(strategy_arg_dict) %}
