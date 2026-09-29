@@ -447,8 +447,9 @@ class MaxComputeAdapter(SQLAdapter):
         blocked = target.widening_blocked_because()
         if blocked is not None:
             return f"MaxCompute will not re-type it because {blocked}"
+        source_size = source.declared_size()
         if mode == EXPAND_COLUMN_TYPES_BOUNDED and (
-            source.declared_size() is None or source.declared_size() > VARCHAR_MAX_SIZE
+            source_size is None or source_size > VARCHAR_MAX_SIZE
         ):
             return (
                 "the model keeps its declared width (expand_column_types='bounded' is the "

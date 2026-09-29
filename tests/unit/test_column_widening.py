@@ -152,6 +152,7 @@ class _SelfStub:
     def get_columns_in_relation(self, relation):
         return []
 
+
 @pytest.mark.parametrize(
     "dtype,expected",
     [
