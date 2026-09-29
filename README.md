@@ -315,7 +315,9 @@ Supported incremental strategies are `merge`, `append`, `delete+insert`,
 `insert_overwrite`, and `microbatch`. Incremental targets are created as
 transactional MaxCompute tables because MaxCompute `MERGE` requires that
 property. Python microbatch models apply dbt's half-open event-time window to
-the returned DataFrame before writing each batch.
+the returned DataFrame before writing each batch. For what a `microbatch` batch
+actually writes - partition scoping, replay, late data, and the profile
+`timezone` dependency - see [Microbatch models](docs/microbatch-support.md).
 
 Writes are failure-safe: table models and Python full refreshes build an
 intermediate relation and swap it only after the MaxFrame DAG succeeds. Failed
