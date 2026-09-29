@@ -8,8 +8,21 @@
 
 
 -- dbt-adapters/dbt/include/global_project/macros/materializations/snapshots/strategies.sql
+{#- Measured: `to_timestamp('<x>')` does not exist on MaxCompute - the server answers
+    "ODPS-0130221 ... function to_timestamp needs at least 2, at most 3 parameters,
+    actually have 1" - so a custom snapshot strategy that rendered a timestamp through
+    this macro got an unusable statement.  An explicit cast is the form the live suite
+    already uses elsewhere, and it accepts both '2024-01-01' and a full
+    '2024-01-01 00:00:00'. -#}
 {% macro maxcompute__snapshot_string_as_time(timestamp) -%}
-    {%- set result = "to_timestamp('" ~ timestamp ~ "')" -%}
+    {#- `timestamp` arrives unquoted (it is the macro argument), so the literal has to
+        be re-quoted here or the cast would be applied to an arithmetic expression. -#}
+    {%- set literal = "'" ~ timestamp ~ "'" -%}
+    {%- if (timestamp | length) == 10 -%}
+        {#- date-only literal: MaxCompute's cast wants a full timestamp -#}
+        {%- set literal = "'" ~ timestamp ~ " 00:00:00'" -%}
+    {%- endif -%}
+    {%- set result = "cast(" ~ literal ~ " as timestamp)" -%}
     {{ return(result) }}
 {%- endmacro %}
 
@@ -58,7 +71,18 @@
     on DBT_INTERNAL_SOURCE.{{ columns.dbt_scd_id }} = DBT_INTERNAL_DEST.{{ columns.dbt_scd_id }}
 
     when matched
+     {%- if config.get("dbt_valid_to_current") %}
+     {#- With `dbt_valid_to_current` the live version is marked by that value, not
+         by NULL. dbt-core's default merge honours it; this override has to as
+         well, otherwise nothing ever matches and the expired version stays live
+         next to the new one (measured: after one update, id 1 had 2 current
+         versions and nothing was closed out). -#}
+     {%- set dest_valid_to = ("DBT_INTERNAL_DEST." ~ columns.dbt_valid_to) | trim %}
+     {%- set current_value = config.get("dbt_valid_to_current") | trim %}
+     and ( {{ equals(dest_valid_to, current_value) }} or {{ dest_valid_to }} is null )
+     {%- else %}
      and DBT_INTERNAL_DEST.{{ columns.dbt_valid_to }} is null
+     {%- endif %}
      and DBT_INTERNAL_SOURCE.dbt_change_type in ('update', 'delete')
         then update
         set DBT_INTERNAL_DEST.{{ columns.dbt_valid_to }} = DBT_INTERNAL_SOURCE.{{ columns.dbt_valid_to }}
@@ -84,6 +108,32 @@
   -- grab current tables grants config for comparision later on
   {%- set grant_config = config.get('grants') -%}
   {%- set tblproperties = config.get('tblproperties', none) -%}
+
+  {#- Config keys the snapshot materialization does not apply.  Say so instead
+      of staying quiet: the snapshot table dbt creates is always an
+      unpartitioned, transactional, primary-key-free table, because closing out
+      an expired version is a merge and a second version of the same unique key
+      must be allowed to coexist with the first. -#}
+  {%- set ignored_configs = [] -%}
+  {%- if config.get('partition_by') is not none -%}
+    {%- do ignored_configs.append('partition_by (a snapshot table is never partitioned: the merge that expires a version writes whole rows)') -%}
+  {%- endif -%}
+  {%- if config.get('primary_keys') or config.get('delta') -%}
+    {%- do ignored_configs.append('primary_keys/delta (a primary key would not allow the current and the expired version of one unique key side by side)') -%}
+  {%- endif -%}
+  {%- if config.get('transactional') is not none and not config.get('transactional') -%}
+    {%- do ignored_configs.append('transactional=false (a snapshot table has to be transactional to merge)') -%}
+  {%- endif -%}
+  {%- if config.get('lifecycle') is not none -%}
+    {%- do ignored_configs.append('lifecycle (not applied to a snapshot table: expiring rows out of a history table would delete history)') -%}
+  {%- endif -%}
+  {%- if ignored_configs | length > 0 -%}
+    {% do exceptions.warn(
+        "Snapshot '" ~ model.name ~ "' sets " ~ (ignored_configs | join('; '))
+        ~ "; the MaxCompute snapshot materialization does not apply them. "
+        ~ "See docs/snapshot-support.md."
+    ) %}
+  {%- endif -%}
 
   {% set target_relation_exists, target_relation = get_or_create_relation(
           database=model.database,
@@ -115,7 +165,13 @@
 
       {% set columns = config.get("snapshot_table_column_names") or get_snapshot_table_column_names() %}
 
-      {{ adapter.valid_snapshot_target(target_relation, columns) }}
+      {#- dbt-core's newer entry point: it runs the adapter's own
+          `valid_snapshot_target` (including the MaxCompute shape checks below) and
+          then the strategy-specific one - a `hard_deletes='new_record'` snapshot
+          against a table without `dbt_is_deleted` used to reach the server and come
+          back as six copies of "column snapshotted_data.dbt_is_deleted cannot be
+          resolved" (measured).  Core refuses that up front, by name. -#}
+      {{ adapter.assert_valid_snapshot_target_given_strategy(target_relation, columns, strategy) }}
 
       {% set build_or_select_sql = snapshot_staging_table(strategy, sql, target_relation) %}
       {% set staging_table = build_snapshot_staging_table(strategy, sql, target_relation, tblproperties) %}
@@ -124,21 +180,28 @@
       {% do adapter.expand_target_column_types(from_relation=staging_table,
                                                to_relation=target_relation) %}
 
-      {% set missing_columns = adapter.get_missing_columns(staging_table, target_relation)
-                                   | rejectattr('name', 'equalto', 'dbt_change_type')
-                                   | rejectattr('name', 'equalto', 'DBT_CHANGE_TYPE')
-                                   | rejectattr('name', 'equalto', 'dbt_unique_key')
-                                   | rejectattr('name', 'equalto', 'DBT_UNIQUE_KEY')
-                                   | list %}
+      {#- The staging query's own helper columns must never become snapshot
+          columns: with a list `unique_key` they arrive as dbt_unique_key_1/2,
+          and a snapshot table that holds them makes the *next* staging query
+          ambiguous (each later run re-aliases the same names over `select *`).
+          `equalto` cannot express that, so filter by name shape here. -#}
+      {% set missing_columns = [] %}
+      {% for column in adapter.get_missing_columns(staging_table, target_relation) %}
+        {% set column_name = column.name | lower %}
+        {% if column_name != 'dbt_change_type' and not column_name.startswith('dbt_unique_key') %}
+          {% do missing_columns.append(column) %}
+        {% endif %}
+      {% endfor %}
 
       {% do create_columns(target_relation, missing_columns) %}
 
-      {% set source_columns = adapter.get_columns_in_relation(staging_table)
-                                   | rejectattr('name', 'equalto', 'dbt_change_type')
-                                   | rejectattr('name', 'equalto', 'DBT_CHANGE_TYPE')
-                                   | rejectattr('name', 'equalto', 'dbt_unique_key')
-                                   | rejectattr('name', 'equalto', 'DBT_UNIQUE_KEY')
-                                   | list %}
+      {% set source_columns = [] %}
+      {% for column in adapter.get_columns_in_relation(staging_table) %}
+        {% set column_name = column.name | lower %}
+        {% if column_name != 'dbt_change_type' and not column_name.startswith('dbt_unique_key') %}
+          {% do source_columns.append(column) %}
+        {% endif %}
+      {% endfor %}
 
       {% set quoted_source_columns = [] %}
       {% for column in source_columns %}

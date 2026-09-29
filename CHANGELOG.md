@@ -5,6 +5,28 @@ All notable changes to `dbt-maxcompute` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- SQL integration regression entry point: `scripts/run-integration-tests.sh`
+  runs a minimal real-SQL set (table, view, incremental, dbt tests, persisted
+  docs) plus an invalid-SQL case that must fail, and verifies that every test
+  schema it created is dropped again.
+- `integration.yml` workflow with a credential gate: a run that cannot reach a
+  MaxCompute project is reported as not run or blocked, never as a passing
+  integration. Fork pull requests, which cannot read repository secrets, show a
+  skipped integration job.
+- `docs/integration-tests.md` covers local and CI runs, including the
+  three-tier (schema-enabled) project requirement and `auth_type: chain` for
+  keeping access keys out of files.
+
+### Fixed
+
+- Functional tests without credentials are now reported as *skipped* with the
+  reason, instead of failing with a missing-file error inside the profile
+  fixture.
+
 ## [1.11.3b3] — 2026-08-26
 
 ### Fixed
