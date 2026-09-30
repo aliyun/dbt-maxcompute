@@ -323,6 +323,9 @@ class MaxFramePythonJobHelper(PythonJobHelper):
                         if retry_number == retries or not self._is_transient_maxframe_error(exc):
                             raise
                         destroy_active_session(session)
+                        if active_sessions:
+                            # Preserve the original failure while a remote writer may live.
+                            raise
                         self._cleanup_failed_relation(namespace, odps_entry)
                         logger.warning(
                             "MaxFrame transport or service failed while building or "
@@ -345,11 +348,6 @@ class MaxFramePythonJobHelper(PythonJobHelper):
                 f"MaxFrame model {self._parsed_model.get('unique_id', '')} failed: {exc}"
             ) from exc
         finally:
-            if not succeeded and odps_entry is not None:
-                self._cleanup_failed_relation(namespace, odps_entry)
-            if odps_entry is not None:
-                for temporary_relation in reversed(temporary_relations):
-                    self._delete_relation_with_retry(temporary_relation, odps_entry)
             destroyed_session_objects = set()
             for active_session in reversed(active_sessions):
                 session_object_id = id(active_session)
@@ -357,7 +355,20 @@ class MaxFramePythonJobHelper(PythonJobHelper):
                     continue
                 destroyed_session_objects.add(session_object_id)
                 destroy_active_session(active_session)
-            if odps_entry is not None:
+            # Stop the remote session before dropping tables that its DAG can
+            # still write. This also applies when execution is interrupted.
+            if active_sessions:
+                logger.warning(
+                    "Retaining MaxFrame output and temporary tables because session "
+                    "destruction was not confirmed; stop the logged sessions before "
+                    "retrying cleanup."
+                )
+            if not active_sessions and not succeeded and odps_entry is not None:
+                self._cleanup_failed_relation(namespace, odps_entry)
+            if not active_sessions and odps_entry is not None:
+                for temporary_relation in reversed(temporary_relations):
+                    self._delete_relation_with_retry(temporary_relation, odps_entry)
+            if not active_sessions and odps_entry is not None:
                 model_schema = self._parsed_model.get("schema") or self._credentials.schema
                 # Retry sessions are destroyed and removed from active_sessions
                 # before finally runs, but their server-side objects still need
