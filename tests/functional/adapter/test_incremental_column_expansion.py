@@ -38,6 +38,7 @@ def test_the_fixtures_are_what_the_tests_claim():
     assert len(LONG_VALUE) == 16
     assert len(NARROW_VALUE) == 10
 
+
 # First run creates the target with a declared varchar(10); the incremental run selects an
 # unbounded 16-character string -- what an upstream column that became a plain `string`
 # produces. The incoming width is unknowable, so the default leaves the declared bound

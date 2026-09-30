@@ -261,13 +261,13 @@ class MaxComputeAdapter(SQLAdapter):
             )
         primary_key = getattr(table, "primary_key", None) if table else None
         scd_id = (column_names or {}).get("dbt_scd_id", "dbt_scd_id").lower()
-        colliding = [
-            str(column).lower() for column in (primary_key or []) if str(column).lower() != scd_id
-        ]
-        if colliding:
+        key_columns = [str(column).lower() for column in (primary_key or [])]
+        # A composite key containing the version id also distinguishes every
+        # historical version; additional data columns do not undo uniqueness.
+        if key_columns and scd_id not in key_columns:
             raise DbtRuntimeError(
                 f"Snapshot target {relation.render()} has a primary key "
-                f"({', '.join(colliding)}). A snapshot keeps the expired version "
+                f"({', '.join(key_columns)}). A snapshot keeps the expired version "
                 "and the current version of one unique key side by side, which "
                 "that key forbids: MaxCompute merges by key and the record ends "
                 "up with no current version. Let dbt create the snapshot table "
@@ -447,8 +447,9 @@ class MaxComputeAdapter(SQLAdapter):
         blocked = target.widening_blocked_because()
         if blocked is not None:
             return f"MaxCompute will not re-type it because {blocked}"
+        source_size = source.declared_size()
         if mode == EXPAND_COLUMN_TYPES_BOUNDED and (
-            source.declared_size() is None or source.declared_size() > VARCHAR_MAX_SIZE
+            source_size is None or source_size > VARCHAR_MAX_SIZE
         ):
             return (
                 "the model keeps its declared width (expand_column_types='bounded' is the "
