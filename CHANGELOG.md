@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `persist_docs` is now what decides whether a column description is written
+  into a table's DDL. Previously `CREATE TABLE` embedded descriptions even when
+  `persist_docs` was off, while views and seeds never did, so the same `.yml`
+  produced different warehouse metadata depending on the materialization (and
+  the upstream `docs generate` adapter tests could not agree with it).
+- Comments read back from MaxCompute metadata are unescaped before they reach
+  `catalog.json`. The service returns *table-level* comments in escaped form
+  (`"` as `\"`, a real newline as the two characters `\n`), which appeared in
+  generated docs as escape garbage and made materialized-view configuration
+  comparison see a change on every run.
+- String literals built from user text are escaped with the character set
+  MaxCompute actually honours (backslash first, then quotes and control
+  characters) instead of only the single quote. A description containing
+  `back\slash` used to lose the backslash, and one ending with a backslash
+  could swallow the closing quote.
+- A column documented in a `.yml` file but absent from the relation now warns,
+  like on other adapters, instead of being dropped silently.
+- An empty or missing description no longer writes a comment: neither an empty
+  string nor the literal text `None` ends up in metadata, and `docs generate`
+  reports such a column as having no comment.
+
+### Under the hood
+
+- Functional tests: re-enabled the upstream `docs generate` adapter tests. The
+  catalog `owner` assertion now takes the identity from the profile's `user` or
+  from `DBT_TEST_USER_1`, and reports that as the skip reason when neither is
+  set instead of failing inside the profile fixture with a `KeyError`. Added
+  `tests/functional/maxcompute/test_docs_comments.py` (requires a real
+  MaxCompute project) for the persist_docs switch, byte-exact comment
+  round-trips, column ordering, and materialized-view comment stability
+  (a `table_comment` with quotes used to make every run look like a
+  configuration change, so the view was dropped and re-created).
 ### Added
 
 - SQL integration regression entry point: `scripts/run-integration-tests.sh`

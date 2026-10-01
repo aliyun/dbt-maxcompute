@@ -56,6 +56,7 @@ from dbt.adapters.maxcompute.utils import (
     quote_string,
     quote_ref,
     retry_on_transport_error,
+    unescape_meta_comment,
 )
 
 logger = AdapterLogger("MaxCompute")
@@ -674,13 +675,15 @@ class MaxComputeAdapter(SQLAdapter):
                 table_type = "MATERIALIZED_VIEW"
             else:
                 table_type = "TABLE"
-            table_comment = odps_table.comment
+            # 表级注释在元数据接口里是转义形态，列注释不是（实测见工作项 record）；
+            # 还原之后 catalog.json 里的文本才等于用户写下的描述，空注释统一为 None。
+            table_comment = unescape_meta_comment(odps_table.comment)
             table_owner = odps_table.owner
             column_index = 1
             for column in odps_table.table_schema.simple_columns:
                 column_name = column.name
                 column_type = column.type.name
-                column_comment = column.comment
+                column_comment = column.comment or None
                 sql_rows.append(
                     (
                         table_database,
@@ -955,10 +958,25 @@ class MaxComputeAdapter(SQLAdapter):
         logger.debug(f"Run raw sql: {sql}, instanceId: {inst.id}")
 
     @available
+    def quote_string_literal(self, value: Optional[str]) -> str:
+        """Render a model-supplied string as a MaxCompute string literal.
+
+        Exposed so Jinja macros and Python share one escaping rule instead of each
+        adapter-side helper inventing its own.
+        """
+        return quote_string(value)
+
+    @available
     def add_comment(self, relation: MaxComputeRelation, comment: str) -> str:
         """
         Add comment to a relation.
+
+        An absent comment is a no-op: nothing is written, and in particular a
+        missing description never becomes the literal text 'None' in metadata.
         """
+        if not comment:
+            logger.debug(f"No comment to persist for {relation.render()}; skipped.")
+            return ""
         if relation.is_table:
             sql = f"ALTER TABLE {relation.database}.{relation.schema}.{relation.identifier} SET COMMENT {quote_string(comment)};"
             return sql
@@ -977,7 +995,13 @@ class MaxComputeAdapter(SQLAdapter):
     ) -> str:
         """
         Add comment to column.
+
+        An absent comment is a no-op, so a documented-but-empty column never ends
+        up with the literal text 'None' as its comment.
         """
+        if not comment:
+            logger.debug(f"No comment to persist for column {column_name}; skipped.")
+            return ""
         table = self.get_odps_table_by_relation(relation)
         if table is not None:
             for column in table.table_schema.columns:
