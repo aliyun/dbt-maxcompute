@@ -405,15 +405,50 @@ dbt-core 1.11.2 + dbt-maxcompute 1.11.3b3 run on 2026-09-25 against a three-tier
 | [dbt-date](https://github.com/dingxin-tech/dbt-date) | partial | Calendar macros (`day_of_week`, `week_start`, `iso_week_of_year`, `date_part`, `convert_timezone`) executed. The date-spine family (`get_base_dates`, `get_date_dimension`, fiscal macros) fails with `ODPS-0130161 invalid TIMESTAMP format` when a plain `YYYY-MM-DD` date is passed, because `maxcompute__get_base_dates` emits a `timestamp'YYYY-MM-DD'` literal without a time part. |
 | [elementary](https://github.com/dingxin-tech/elementary) | partial | Its own models and tests build; the `monitors_runs` view fails with `ODPS-0130071` because a DOUBLE value is written into the FLOAT-typed `execution_time` column. |
 | [dbt-project-evaluator](https://github.com/dingxin-tech/dbt-project-evaluator) | blocked | `stg_nodes` fails on the same DOUBLE/FLOAT conflict, which cascades to skip most of the package's models and tests. |
-| [dbt-data-reliability](https://github.com/dingxin-tech/dbt-data-reliability) | partial | Same `monitors_runs` failure as elementary. It also still depends on the upstream `dbt-labs/dbt_utils`, which has no MaxCompute dispatch and does not build here, so that dependency has to be repointed to the MaxCompute edition. |
+| [dbt-data-reliability](https://github.com/dingxin-tech/dbt-data-reliability) | partial | Same `monitors_runs` failure as elementary; that run installed hub `dbt-labs/dbt_utils` 1.4.1 and 32 of 33 nodes still built, so the hub dependency was not what stopped this build. It is still the wrong dependency for macros that need MaxCompute dispatch (`width_bucket`, `deduplicate`), which the hub edition does not provide. |
 
 Two things to watch when installing these packages:
 
 * Several `packages.yml` files reference a branch (`revision: main`) instead of a tag, so a build is
   only reproducible if you commit `package-lock.yml`; `dbt-data-reliability` has no release tag yet.
+  Pinned refs and the lock-file workflow are spelled out below (checked against the live remotes on 2026-10-01).
 * dbt needs a three-tier MaxCompute project (`project.schema.table`). On a two-tier project, `dbt build`
   fails up front with `ODPS-0110061 Invalid database operations on two-tier model`.
 
+
+### Reproducing an install
+
+Pin the ref, then let dbt record what it resolved to. `package-lock.yml` holds full commit shas,
+so a rebuild months later installs the same code even if a branch moved or a tag was retargeted:
+
+```yaml
+# your_project/packages.yml
+packages:
+  - git: "https://github.com/dingxin-tech/dbt-expectations.git"
+    revision: 0.10.4-mc.1
+```
+
+```bash
+rm -rf dbt_packages package-lock.yml && dbt deps   # writes the lock with commit shas
+dbt deps --lock                                    # later runs install exactly what is locked
+```
+
+| Package | `revision:` | why |
+|---|---|---|
+| [dbt-utils](https://github.com/dingxin-tech/dbt-utils) | `1.3.0-mc.1` | tag, and it equals `main` (`3463ce1e4…`) |
+| [dbt-date](https://github.com/dingxin-tech/dbt-date) | `0.10.1-mc.1` | tag, and it equals `main` (`80b5dca27…`) |
+| [dbt-expectations](https://github.com/dingxin-tech/dbt-expectations) | `0.10.4-mc.1` | tag, and it equals `main` (`2c896488f…`) |
+| [dbt-project-evaluator](https://github.com/dingxin-tech/dbt-project-evaluator) | `d603d32b2c25e02fc965cd31ba1f8cf7c8c81103` | the `1.0.0-mc.1` tag is `d0a400e7a…` while `main` is `d603d32b2…`; pin the sha you actually tested |
+| [elementary](https://github.com/dingxin-tech/elementary) | `0.16.4-mc.1` | tag, and it equals `main` (`684a0d21b…`) |
+| [dbt-data-reliability](https://github.com/dingxin-tech/dbt-data-reliability) | `9ec0685e6f47ba78b3c1aa574f6ab34c657a904f` | no release tag exists in this repository, so a sha is the only immutable ref |
+
+If you need code that is newer than a package's tag, pin the full commit sha of the branch you
+tested rather than the branch name, and say so in your project's `packages.yml` comment: a named
+branch silently changes underneath every install.
+
+To upgrade a dependency: change the ref, `rm -rf dbt_packages package-lock.yml && dbt deps`,
+re-run `dbt build` against a three-tier project, and commit `packages.yml` together with the new
+`package-lock.yml` so the pair can be reverted as one unit.
 
 ## Known Limitations
 
