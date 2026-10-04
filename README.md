@@ -458,9 +458,17 @@ packages:
 ```
 
 ```bash
-rm -rf dbt_packages package-lock.yml && dbt deps   # writes the lock with commit shas
-dbt deps --lock                                    # later runs install exactly what is locked
+rm -rf dbt_packages package-lock.yml && dbt deps   # first install: resolves, installs, writes the lock
+dbt deps                                           # later runs: install exactly what the committed lock records
+dbt deps --lock                                    # regenerate the lock file only - it installs nothing
 ```
+
+`--lock` is not an install command. On dbt-core 1.11 `dbt deps --help` describes it as
+"Generate the package-lock.yml file without install the packages." - it writes
+`package-lock.yml` and stops there. Reproducing an install is plain `dbt deps`: with a
+committed lock and an unchanged `packages.yml`, that is what reads the lock as its source
+of truth, and it is what a rebuild months later runs.
+
 
 | Package | `revision:` | why |
 |---|---|---|
