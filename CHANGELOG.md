@@ -20,12 +20,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/integration-tests.md` covers local and CI runs, including the
   three-tier (schema-enabled) project requirement and `auth_type: chain` for
   keeping access keys out of files.
+- New `catalog_strict_metadata` profile option (default `false`). When enabled,
+  `dbt docs generate` fails if a relation listed for the catalog stays unreadable
+  after the metadata retries; dbt-core records the failure in `catalog.json`
+  `errors`, making the gap visible to consumers of the artifact.
 
 ### Fixed
 
 - Functional tests without credentials are now reported as *skipped* with the
   reason, instead of failing with a missing-file error inside the profile
   fixture.
+- `dbt docs generate` no longer drops unreadable relations from `catalog.json`
+  without naming them. Each skipped relation is now listed in a single warning
+  that explains the gap and how to opt into strict mode.
+- `get_odps_table_by_relation` retries now also cover `NoSuchObject` raised by the
+  metadata lookup itself, not only by reloading the returned object.
+
+
+- Microbatch models whose event-time column is a `datetime` can now run on the
+  adapter's default profile. dbt-core renders the batch window from a UTC
+  `datetime`, so the text carries an offset (`event_time >= '2025-05-01
+  00:00:00+00:00'`); MaxCompute compares that against `timestamp` columns but
+  refuses it for `datetime` ones, whose string form is `yyyy-mm-dd hh:mi:ss`
+  exactly, so every batch failed while the physical plan was generated. The
+  boundary is now stated without the offset suffix - and only where the session
+  clock reads UTC, so the window denotes the same instant. Sessions pinned to
+  another zone are untouched, and microseconds are kept rather than rounded:
+  a `datetime` column rejects fractional seconds too, so a `--sample` window
+  against one still fails to compile instead of silently changing the window.
+  See `docs/microbatch-support.md`.
+
+- Microbatch models that declare their event column as a `date` partition field are now refused
+  at compile time instead of running empty. dbt-core compares each batch against a timestamp-shaped
+  boundary (`event_time >= '2025-05-01 00:00:00'` since #40, with an offset before it), and
+  MaxCompute evaluates a `DATE` against either text as `NULL` rather than raising: every batch
+  selected zero rows, the `insert overwrite` of an empty query changed nothing, and `dbt run`
+  reported the model as a success with the target left empty. Measured on a real project - four
+  source rows across two days, `PASS=2`, zero rows - in `Etc/GMT`, `Asia/Shanghai` and `Etc/GMT+8`
+  sessions alike, so no session clock can line the two up. Rendering a date-only boundary would fix
+  that comparison but cannot be done where the boundary is written: that point is handed a field
+  name, not a column type, and the date-only text is measured to be refused outright by a `datetime`
+  column and to evaluate to `NULL` for `timestamp` and `timestamp_ntz`, i.e. it would empty or break
+  the models that work today. The error names the replacement, which is measured end to end: expose
+  the event column as an instant *in the relation the window is applied to* (a `cast()` inside the
+  microbatch model's own SELECT is too late) and partition on it as `timestamp`.
+  See `docs/microbatch-support.md`.
 
 ## [1.11.3b3] — 2026-08-26
 
