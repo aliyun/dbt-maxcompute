@@ -12,7 +12,8 @@ The regressions that hold these statements in place live in
 | --- | --- |
 | `test_incremental.py::TestMicrobatchMaxCompute` | upstream's microbatch contract, on this warehouse |
 | `test_microbatch_window_semantics.py` | windows, replay, empty window, late data, duplicate keys, rejected configurations |
-| `test_microbatch_partition_timezone.py` | the window/partition clock pairing, on a UTC session and on `timezone: Asia/Shanghai` |
+| `test_microbatch_partition_timezone.py` | the window/partition clock pairing: a UTC session, `timezone: Asia/Shanghai`, a negative/DST zone, and a `datetime` column on a shifted session |
+| `test_microbatch_datetime_event_column.py` | the shape of a batch boundary, and which event-column types can be compared against it |
 | `test_microbatch_failure_retry.py` | what survives a batch that fails, and what `dbt retry` replays |
 
 ## How a batch is written
@@ -46,6 +47,59 @@ dbt run --event-time-start 2025-05-02 --event-time-end 2025-05-03
 
 The two flags are mutually required, and they are what makes these runs reproducible.
 
+## The event column's type decides whether the window text parses at all
+
+dbt-core computes every batch window in UTC and renders it from a `datetime`, so the text it
+produces carries an offset: `event_time >= '2025-05-01 00:00:00+00:00'`. MaxCompute compares that
+shape against `timestamp` and `timestamp_ntz` columns, but a `datetime` column accepts
+`yyyy-mm-dd hh:mi:ss` and nothing else - the offset makes the batch fail while the physical plan is
+being generated, before any row is read:
+
+```
+ODPS-0130071:[0,0] Semantic analysis exception - physical plan generation failed:
+ODPS-0121095:Invalid argument - in function cast, string datetime's format must be
+yyyy-mm-dd hh:mi:ss, input string is:2025-05-01 00:00:00+00:00
+```
+
+So on the adapter's default profile - no `timezone` in the profile, so the session runs on UTC - a
+microbatch model whose event column is `datetime` could not run at all, while the same model on
+`timestamp` ran. The adapter now states the window **without the offset suffix** whenever the
+session clock is UTC, which leaves the instant the window means unchanged. Measured on a real
+project, three column types x three boundary texts, each repeated on three session clocks
+(`Etc/GMT`, `Asia/Shanghai`, `Etc/GMT+8`). The table states whether a text **parses** - which rows a
+session picks with a text that parses depends on its clock, and that is the next section's subject:
+
+| Event column | `'2025-05-01 09:00:00'` | `'2025-05-01 09:00:00+00:00'` | `'2025-05-01 09:00:00.500000'` |
+| --- | --- | --- | --- |
+| `datetime` | parses; selects its rows on a UTC session | refused (`ODPS-0121095`) | refused (`ODPS-0121095`) |
+| `timestamp` | parses | parses | parses |
+| `timestamp_ntz` | parses | parses | parses |
+
+Removing the suffix moves no window: on a given session clock, the same rows were selected with
+and without the `+00:00` suffix for both `timestamp` and `timestamp_ntz` (measured 2026-10-07 at
+18:43 on a real project, three session clocks x both texts). Only the session clock decides which
+rows a text selects - the subject of the next section - and `datetime` is the one type that parses
+only the suffix-free form.
+
+`date` does not appear above because no text in it compares: a `date` event column yields NULL
+against all three, so every batch selects nothing while the run still reports success. That is a
+different defect from this one, and pull request #39 proposes refusing it at compile time.
+
+Two edges are kept visible rather than smoothed over:
+
+* **Fractional seconds are not rounded away.** `datetime` refuses them too (see the table), so a
+  window carrying one still fails to compile against such a column - in practice only `--sample`,
+  whose end is `datetime.now(UTC)`. Rounding would have traded that loud failure for a silently
+  different window on the two types that do accept fractions. Batch boundaries themselves never
+  carry a sub-second value: dbt-core aligns every boundary to `batch_size`, and the finest grain is
+  an hour.
+* **Both halves are one rule.** Stating the boundary as the session's own reading of the instant -
+  which is what the next section is about - is also what makes the text parseable here: on a
+  session that pinned `Asia/Shanghai` a `datetime` column reads `'2025-05-01 08:00:00'` for the UTC boundary
+  `2025-05-01 00:00:00+00:00`, so it both compiles and lands on its own partition
+  (`TestMicrobatchDatetimeColumnOnShiftedSession`). What still refuses to compile is a boundary with
+  fractional seconds, for the reason above.
+
 ## Requirements, and who enforces them
 
 | Combination | Outcome | Enforced by |
@@ -78,13 +132,17 @@ correcting. A profile that *does* set `timezone` used to move one clock and not 
 window reached into its neighbour's partition, and the later `insert overwrite` erased rows the
 earlier window had written, while the run reported success.
 
-`MaxComputeRelation._render_event_time_filtered` now states each boundary in the session's own
-reading of the same UTC instant - `2025-05-01 00:00:00+00:00` becomes `'2025-05-01 08:00:00'` under
-`timezone: Asia/Shanghai` - which the server parses back into that instant, so the window and the
-partition key are cut by the same clock. Two properties of that rendering are deliberate:
+`session_boundary_text` (used by `MaxComputeRelation._render_event_time_filtered`) now states each
+boundary in the session's own reading of the same UTC instant - `2025-05-01 00:00:00+00:00` becomes
+`'2025-05-01 08:00:00'` under `timezone: Asia/Shanghai` - which the server parses back into that
+instant, so the window and the partition key are cut by the same clock. The same call also drops the
+offset suffix, so this is one rule, not two: state the instant the way this session will read it
+back, and the text is both on the right clock and in a shape every time type can compare. Two
+properties of that rendering are deliberate:
 
-* on the default profile the SQL is unchanged, character for character: the session clock is
-  `Etc/GMT`, so pipelines that already agree are not routed through the new code at all;
+* on a UTC session the two readings are the *same text*, so this shift moves nothing there - that
+  path had already changed once, when the offset suffix was dropped (#40), and it changes again only
+  in the sense that the same suffix-free string is now produced by one rule instead of a branch;
 * the boundary stays a plain string literal. The alternative spelling of the same instant,
   `from_utc_timestamp(...)`, evaluates to a `TIMESTAMP`, and MaxCompute refuses to compare a
   `TIMESTAMP` with a `DATETIME` or `DATE` operand instead of converting it (measured) - so that form
@@ -115,6 +173,9 @@ dbt-core rendered it and a warning is logged: a guessed shift is worse than the 
   to the compiled SQL;
 - `batch_size` of `month` or `year`, and how their units interact with `trunc_time()`;
 - `partitions`, `lookback`, `on_schema_change`, `grants` and model contracts on microbatch models;
+- `datetime` event columns on a session whose zone this adapter cannot resolve (nothing pinned, or a
+  name that is not in any tz database): the window stays as dbt-core rendered it, offset suffix
+  included, so such a column still refuses to compile there;
 - `dbt retry` for a model whose *first* batch fails.
 - Hour-granularity batches whose boundary falls in a timezone's DST gap or fold. The shift is
   computed per boundary against the profile's zone, and the offline tests cover an EDT/EST zone,

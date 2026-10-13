@@ -38,30 +38,40 @@ from dbt.tests.util import run_dbt
 
 # Two UTC days, two rows in each, both far from the day boundary so an eight-hour shift in the
 # window cannot move a row between days. `from_unixtime()` yields the same instant whatever the
-# session timezone is, which is what makes the two cells below comparable.
-_input_sql = (
-    "{{ config(materialized='table', event_time='event_time') }}\n"
-    "select 1 as id, cast(from_unixtime(1746061200) as timestamp) as event_time\n"
-    "union all\n"
-    "select 2 as id, cast(from_unixtime(1746140400) as timestamp) as event_time\n"
-    "union all\n"
-    "select 3 as id, cast(from_unixtime(1746147600) as timestamp) as event_time\n"
-    "union all\n"
-    "select 4 as id, cast(from_unixtime(1746226800) as timestamp) as event_time\n"
-)
+# session timezone is, which is what makes the cells below comparable: rows written as
+# `TIMESTAMP'...'` text would move with the session exactly as the window does, and the two shifts
+# would cancel - the cell would then pass whether or not the rendering was aligned.
+_EPOCHS = (
+    1746061200,
+    1746140400,
+    1746147600,
+    1746226800,
+)  # 05-01 01:00/23:00, 05-02 01:00/23:00 UTC
 
-_model_sql = (
-    "{{ config(\n"
-    "    materialized='incremental',\n"
-    "    incremental_strategy='microbatch',\n"
-    "    unique_key='id',\n"
-    "    event_time='event_time',\n"
-    "    batch_size='day',\n"
-    "    begin=modules.datetime.datetime(2025, 5, 1, 0, 0, 0),\n"
-    "    partition_by={'field': 'event_time', 'data_type': 'timestamp', 'granularity': 'day'}\n"
-    ") }}\n"
-    "select id, event_time from {{ ref('input_model') }}\n"
-)
+
+def _input_sql(event_type):
+    rows = "\nunion all\n".join(
+        f"select {i} as id, cast(from_unixtime({epoch}) as {event_type}) as event_time"
+        for i, epoch in enumerate(_EPOCHS, start=1)
+    )
+    return "{{ config(materialized='table', event_time='event_time') }}\n" + rows + "\n"
+
+
+def _model_sql(event_type):
+    return (
+        "{{ config(\n"
+        "    materialized='incremental',\n"
+        "    incremental_strategy='microbatch',\n"
+        "    unique_key='id',\n"
+        "    event_time='event_time',\n"
+        "    batch_size='day',\n"
+        "    begin=modules.datetime.datetime(2025, 5, 1, 0, 0, 0),\n"
+        f"    partition_by={{'field': 'event_time', 'data_type': '{event_type}', "
+        "'granularity': 'day'}\n"
+        ") }}\n"
+        "select id, event_time from {{ ref('input_model') }}\n"
+    )
+
 
 DAY1 = ("2025-05-01", "2025-05-02")
 DAY2 = ("2025-05-02", "2025-05-03")
@@ -105,10 +115,14 @@ class _DayWindowScenario:
     """Subclasses choose the session timezone; the scenario and the expectations are the same."""
 
     profile_timezone = None
+    event_column_type = "timestamp"
 
     @pytest.fixture(scope="class")
     def models(self):
-        return {"input_model.sql": _input_sql, "microbatch_model.sql": _model_sql}
+        return {
+            "input_model.sql": _input_sql(self.event_column_type),
+            "microbatch_model.sql": _model_sql(self.event_column_type),
+        }
 
     @pytest.fixture(scope="class")
     def dbt_profile_target(self):
@@ -198,3 +212,18 @@ class TestMicrobatchNegativeOffsetSession(_DayWindowScenario):
     """
 
     profile_timezone = "America/New_York"
+
+
+class TestMicrobatchDatetimeColumnOnShiftedSession(_DayWindowScenario):
+    """A `datetime` event column on a session that has to be shifted: `timezone: Asia/Shanghai`.
+
+    Two fixes meet in this cell. A `datetime` column refuses dbt-core's offset-bearing text outright
+    (`ODPS-0121095`, refused at physical-plan time - that half was fixed by the suffix removal), and
+    a session that pinned `Asia/Shanghai` needs the window shifted onto its own clock or adjacent
+    batches overwrite each other's partitions. Stating the instant as the session's reading satisfies
+    both at once, and the assertions are the same ones the `timestamp` cells use: no offset suffix in
+    the text, and one partition per batch.
+    """
+
+    profile_timezone = "Asia/Shanghai"
+    event_column_type = "datetime"

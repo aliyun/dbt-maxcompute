@@ -99,6 +99,7 @@ Currently we support the following parameters：
 | `quota_name`        | Interactive quota group name for MaxQA. When omitted, the server returns a default connection (if available). | -                                     |
 | `maxqa_fallback`    | Enable server-side fallback to offline when MaxQA cannot handle a query (e.g. DDL).                         | `true`                                |
 | `maxqa_fallback_quota` | Offline quota group name used for fallback. When omitted, the server uses the project default.           | -                                     |
+| `catalog_strict_metadata` | Fail catalog generation when a listed relation stays unreadable after metadata retries, instead of skipping it with a warning. | `false` |
 | `submission_method` | Default Python model submission method. The supported value is `maxframe`. | `maxframe` |
 | `maxframe_quota_name` | Optional quota used by MaxFrame sessions. | Project default |
 | `maxframe_retries` | Number of new-session retries for transient MaxFrame DAG transport failures. | `2` |

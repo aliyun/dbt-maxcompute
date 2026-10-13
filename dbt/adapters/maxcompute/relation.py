@@ -1,11 +1,12 @@
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import FrozenSet, Optional, TypeVar
 
 from dbt.adapters.base.relation import BaseRelation, EventTimeFilter, InformationSchema
 from dbt.adapters.contracts.relation import RelationType, Path, Policy, RelationConfig
+from dbt.adapters.events.logging import AdapterLogger
+from odps import options
 from odps.models import Table
-
-from dbt.adapters.maxcompute import session_clock
 
 from dbt.adapters.maxcompute.relation_configs._materialized_view import (
     MaxComputeMaterializedViewConfig,
@@ -13,12 +14,113 @@ from dbt.adapters.maxcompute.relation_configs._materialized_view import (
 
 Self = TypeVar("Self", bound="MaxComputeRelation")
 
+logger = AdapterLogger("MaxCompute")
+
 
 @dataclass
 class OdpsIncludePolicy(Policy):
     database: bool = True
     schema: bool = True
     identifier: bool = True
+
+
+#: Zone names that all denote a session clock of zero offset. Matching the names already seen keeps
+#: the common profiles off the resolution path; anything else is decided by its own offset.
+_UTC_SESSION_NAMES = frozenset(
+    {"utc", "gmt", "z", "etc/gmt", "etc/utc", "etc/zulu", "gmt+0", "gmt-0", "+00:00", "-00:00"}
+)
+
+
+def _utc_moment(moment: datetime) -> datetime:
+    """The same instant on the UTC clock, treating a naive boundary as UTC (which dbt-core renders)."""
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
+def session_wall_clock(moment: datetime, zone: Optional[object] = None) -> str:
+    """The timestamp text ``YYYY-MM-DD HH:MM:SS[.ffffff]`` - an instant stated with no offset.
+
+    ``zone`` is the clock to state it on; without one, the instant's own reading is used.
+    Microseconds are kept rather than rounded away, because rounding would quietly move rows for
+    the column types that can hold them.
+    """
+    reading = moment if zone is None else moment.astimezone(zone)  # type: ignore[arg-type]
+    text = reading.strftime("%Y-%m-%d %H:%M:%S")
+    if reading.microsecond:
+        text += f".{reading.microsecond:06d}"
+    return text
+
+
+def _session_zone(name: str) -> Optional[object]:
+    """Resolve a session timezone name, preferring the host's own tz database.
+
+    ``zoneinfo`` is the fresher source where the host has tz data; ``pytz`` carries its own copy of
+    the database and is already a dependency of the stack this adapter builds on (dbt-core's own
+    microbatch builder uses it), which is what a Windows host with no system tz data can fall back
+    to. ``None`` means this host cannot name the clock the server is about to use.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001 - no tzdata on the host is expected on some platforms
+        pass
+    try:
+        import pytz
+
+        return pytz.timezone(name)
+    except Exception:  # noqa: BLE001 - unknown name: the caller degrades, it does not guess
+        logger.warning(
+            "Cannot resolve the session timezone '%s' here, so the microbatch window stays as "
+            "dbt-core rendered it: it will be compared on the session clock while trunc_time() "
+            "cuts UTC, which can let adjacent batches overwrite each other's partitions." % name
+        )
+        return None
+
+
+def session_boundary_text(moment: datetime) -> Optional[str]:
+    """The batch boundary as the session clock will parse it back into the instant dbt meant.
+
+    Two properties of the text matter, and one thing decides both - the session timezone:
+
+    * **no offset suffix.** dbt-core renders a UTC ``datetime``, so its text reads
+      ``2025-05-01 00:00:00+00:00``. MaxCompute compares that against ``timestamp`` and
+      ``timestamp_ntz`` columns, but a ``datetime`` column accepts ``yyyy-mm-dd hh:mi:ss`` and
+      nothing else, and the batch dies at physical-plan time before reading a row
+      (``ODPS-0121095``);
+    * **the session's own reading of that instant.** A timestamp string is parsed on the session
+      timezone, while the partitions the batch overwrites come from ``trunc_time()``, which cuts
+      UTC. On a UTC session the two readings are the same text, so stating the instant with no
+      offset moves nothing. On a session that pinned ``Asia/Shanghai`` the same instant has to be
+      written ``2025-05-01 08:00:00`` for the server to read it back as ``2025-05-01 00:00:00`` UTC;
+      written as dbt-core does, the window starts eight hours early, reaches into its neighbour's
+      partition, and the later ``insert overwrite`` erases rows the earlier batch had written.
+
+    A zone is judged at the instant of this boundary rather than by its name or a fixed date, so a
+    zone that is UTC in January and UTC+1 in July gets the summer shift, not the winter one.
+
+    Returns ``None`` when the session clock cannot be stated from here: nothing pinned (the
+    project's own default applies, unknowable locally), a value that is not a zone name, or a name
+    this host cannot resolve. The caller then keeps dbt-core's rendering - a guessed shift is
+    worse than the known behaviour.
+    """
+    pinned = options.local_timezone
+    if pinned is None:
+        return None  # nothing pinned here: the project's own default applies, unknowable locally
+    if not pinned:
+        # The adapter's default: ``MaxComputeCredentials._get_odps`` leaves pyodps' value falsey,
+        # and pyodps then submits ``odps.sql.timezone=Etc/GMT`` with every statement.
+        return session_wall_clock(_utc_moment(moment))
+    if not isinstance(pinned, str):
+        return None
+    utc_aware = _utc_moment(moment)
+    if pinned.strip().lower() in _UTC_SESSION_NAMES:
+        return session_wall_clock(utc_aware)
+    zone = _session_zone(pinned)
+    if zone is None:
+        return None
+    return session_wall_clock(utc_aware.astimezone(zone), zone)
 
 
 @dataclass(frozen=True, eq=False, repr=False)
@@ -52,29 +154,25 @@ class MaxComputeRelation(BaseRelation):
     )
 
     def _render_event_time_filtered(self, event_time_filter: EventTimeFilter) -> str:
-        """State the batch window on the clock ``trunc_time()`` cuts partitions on.
+        """State the batch window on the clock its partitions are cut on, in text every type parses.
 
-        dbt-core compares ``event_time`` against a UTC boundary rendered as a timestamp string.
-        MaxCompute parses that string on the session timezone, while the partitions the batch is
-        overwritten into come from ``trunc_time()``, which cuts UTC days. Those two clocks line up
-        on the adapter's default profile because it submits ``odps.sql.timezone=Etc/GMT``, but a
-        profile that sets ``timezone`` moves only the window: one batch then reaches into the
-        partition of its neighbour and the later ``insert overwrite`` erases the earlier rows.
+        dbt-core compares ``event_time`` against a UTC boundary rendered as an offset-bearing
+        timestamp string. `session_boundary_text` restates that instant as a suffix-free string on
+        the session clock, which is what makes the comparison land on the instant (see
+        `docs/microbatch-support.md` for the measurements behind both halves).
 
-        The fix writes the boundary as the session's own reading of the same UTC instant, which the
-        server parses back into that instant. The boundary stays a plain string literal - the same
-        shape dbt-core renders today, rather than a function call whose cost the optimizer would
-        have to absorb - and the UTC-session path keeps rendering exactly the SQL it renders now.
+        One residual is deliberately left visible: a ``datetime`` column rejects fractional seconds
+        as well, so a ``--sample`` window (whose end is ``datetime.now(UTC)``, microseconds
+        included) still fails to compile against one. Rounding those away would have traded a loud
+        error for a silently different window on the types that do accept fractions.
 
-        Returns dbt-core's rendering when the session clock is unknown or cannot be resolved
-        locally: guessing a shift would be worse than leaving the known behaviour in place.
+        Where the session clock cannot be stated from here the window is left exactly as dbt-core
+        rendered it, offset suffix and all.
         """
         base = super()._render_event_time_filtered(event_time_filter)
-        session = session_clock.session_timezone()
-        if not base or not session or session_clock.is_utc_session(session):
+        if not base:
             return base
 
-        field = event_time_filter.field_name
         parts = []
         for boundary, operator in (
             (event_time_filter.start, ">="),
@@ -82,10 +180,11 @@ class MaxComputeRelation(BaseRelation):
         ):
             if boundary is None:
                 continue
-            wall_clock = session_clock.as_session_wall_clock(boundary, session)
-            if wall_clock is None:
+            text = session_boundary_text(boundary)
+            if text is None:
+                # A session clock this cannot state the window on: leave dbt-core's rendering alone.
                 return base
-            parts.append(f"{field} {operator} '{wall_clock}'")
+            parts.append(f"{event_time_filter.field_name} {operator} '{text}'")
 
         return " and ".join(parts) if parts else base
 

@@ -20,12 +20,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/integration-tests.md` covers local and CI runs, including the
   three-tier (schema-enabled) project requirement and `auth_type: chain` for
   keeping access keys out of files.
+- New `catalog_strict_metadata` profile option (default `false`). When enabled,
+  `dbt docs generate` fails if a relation listed for the catalog stays unreadable
+  after the metadata retries; dbt-core records the failure in `catalog.json`
+  `errors`, making the gap visible to consumers of the artifact.
 
 ### Fixed
 
 - Functional tests without credentials are now reported as *skipped* with the
   reason, instead of failing with a missing-file error inside the profile
   fixture.
+- `dbt docs generate` no longer drops unreadable relations from `catalog.json`
+  without naming them. Each skipped relation is now listed in a single warning
+  that explains the gap and how to opt into strict mode.
+- `get_odps_table_by_relation` retries now also cover `NoSuchObject` raised by the
+  metadata lookup itself, not only by reloading the returned object.
+
+
+- Microbatch models whose event-time column is a `datetime` can now run on the
+  adapter's default profile. dbt-core renders the batch window from a UTC
+  `datetime`, so the text carries an offset (`event_time >= '2025-05-01
+  00:00:00+00:00'`); MaxCompute compares that against `timestamp` columns but
+  refuses it for `datetime` ones, whose string form is `yyyy-mm-dd hh:mi:ss`
+  exactly, so every batch failed while the physical plan was generated. The
+  boundary is now stated without the offset suffix, and microseconds are kept
+  rather than rounded: a `datetime` column rejects fractional seconds too, so a
+  `--sample` window against one still fails to compile instead of silently
+  changing the window. See `docs/microbatch-support.md`.
+- Microbatch models on a profile that pins a non-UTC `timezone` no longer lose
+  rows between adjacent batches. MaxCompute parses a timestamp string on the
+  session timezone while the batch's partitions come from `trunc_time()`, which
+  cuts UTC, so a `timezone: Asia/Shanghai` profile shifted every window eight
+  hours into its neighbour's partition and the later `insert overwrite` erased
+  rows the earlier batch had written - with the run reporting success. The
+  boundary is now stated as the session's own reading of the same instant, so
+  the window and the partition key are cut by one clock; where this cannot state
+  the session clock (nothing pinned, a value that is not a zone name, or a name
+  the host cannot resolve) the window is left exactly as dbt-core rendered it.
 
 ## [1.11.3b3] — 2026-08-26
 
