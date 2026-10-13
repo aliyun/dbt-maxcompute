@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, tzinfo, timezone
 from typing import FrozenSet, Optional, TypeVar
 
 from dbt.adapters.base.relation import BaseRelation, EventTimeFilter, InformationSchema
@@ -38,21 +38,21 @@ def _utc_moment(moment: datetime) -> datetime:
     return moment.astimezone(timezone.utc)
 
 
-def session_wall_clock(moment: datetime, zone: Optional[object] = None) -> str:
+def session_wall_clock(moment: datetime, zone: Optional[tzinfo] = None) -> str:
     """The timestamp text ``YYYY-MM-DD HH:MM:SS[.ffffff]`` - an instant stated with no offset.
 
     ``zone`` is the clock to state it on; without one, the instant's own reading is used.
     Microseconds are kept rather than rounded away, because rounding would quietly move rows for
     the column types that can hold them.
     """
-    reading = moment if zone is None else moment.astimezone(zone)  # type: ignore[arg-type]
+    reading = moment if zone is None else moment.astimezone(zone)
     text = reading.strftime("%Y-%m-%d %H:%M:%S")
     if reading.microsecond:
         text += f".{reading.microsecond:06d}"
     return text
 
 
-def _session_zone(name: str) -> Optional[object]:
+def _session_zone(name: str) -> Optional[tzinfo]:
     """Resolve a session timezone name, preferring the host's own tz database.
 
     ``zoneinfo`` is the fresher source where the host has tz data; ``pytz`` carries its own copy of
