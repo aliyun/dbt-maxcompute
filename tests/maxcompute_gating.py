@@ -221,6 +221,23 @@ CREDENTIAL_FAILURE_MARKERS = (
 )
 
 
+#: A run whose interpreter cannot import the adapter is a broken environment,
+#: and saying "the project is not reachable" sends people to the network.
+DEPENDENCY_FAILURE_MARKERS = (
+    "no module named",
+    "modulenotfounderror",
+    "importerror",
+    "dbt-core",
+    # "command not found" only - the server says "Table/Project not found" too
+    "command not found",
+)
+
+
+def is_dependency_failure(message: str) -> bool:
+    lowered = (message or "").lower()
+    return any(marker in lowered for marker in DEPENDENCY_FAILURE_MARKERS)
+
+
 def is_credential_failure(message: str) -> bool:
     lowered = (message or "").lower()
     return any(marker in lowered for marker in CREDENTIAL_FAILURE_MARKERS)
@@ -266,6 +283,12 @@ def preflight_reason() -> Optional[str]:
             next(iter(client.list_schemas(project)), None)
     except Exception as exc:
         message = brief_exception_message(exc)
+        if is_dependency_failure(message):
+            return (
+                f"the test environment cannot run before contacting {project}: {message} - "
+                "install the adapter and its requirements (pip install -r dev-requirements.txt "
+                "&& pip install -e .) or point PYTHON at that interpreter"
+            )
         if is_credential_failure(message):
             return (
                 f"auth_type={auth_type(profile)} did not resolve a credential before the project "

@@ -345,3 +345,77 @@ class TestPreflightVerdict:
             "Name or service not known",
         ]:
             assert not maxcompute_gating.is_credential_failure(message), message
+
+
+class TestDependencyVerdict:
+    """A missing python package is an environment problem, not a dead project."""
+
+    @staticmethod
+    def _profile(tmp_path, monkeypatch):
+        write_profile(
+            tmp_path,
+            monkeypatch,
+            PROFILE_BODY + "auth_type: access_key\naccess_key_id: id\naccess_key_secret: s\n",
+        )
+
+    @staticmethod
+    def _probe_raises(monkeypatch, error):
+        def boom(*args, **kwargs):
+            raise error
+
+        monkeypatch.setattr(maxcompute_gating, "odps_client", boom)
+
+    def test_import_failure_is_named_as_a_dependency_problem(self, tmp_path, monkeypatch):
+        self._profile(tmp_path, monkeypatch)
+        self._probe_raises(monkeypatch, ModuleNotFoundError("No module named 'dbt'"))
+        reason = maxcompute_gating.preflight_reason()
+        assert "cannot run before contacting" in reason
+        assert "dev-requirements.txt" in reason
+        assert "not reachable" not in reason
+
+    def test_missing_interpreter_is_named_as_a_dependency_problem(self, tmp_path, monkeypatch):
+        self._profile(tmp_path, monkeypatch)
+        self._probe_raises(monkeypatch, RuntimeError("bash: line 1: python: command not found"))
+        assert "cannot run before contacting" in maxcompute_gating.preflight_reason()
+
+    def test_network_failure_still_says_not_reachable(self, tmp_path, monkeypatch):
+        """负对照：新分支不能把真的连不上也吞成依赖问题。"""
+        self._profile(tmp_path, monkeypatch)
+        self._probe_raises(monkeypatch, OSError("[Errno 101] Network is unreachable"))
+        reason = maxcompute_gating.preflight_reason()
+        assert "not reachable" in reason
+        assert "dev-requirements" not in reason
+
+    def test_credential_failure_keeps_its_own_verdict(self, tmp_path, monkeypatch):
+        self._profile(tmp_path, monkeypatch)
+        self._probe_raises(
+            monkeypatch,
+            TypeError("Client.get_credentials() missing 1 required positional argument: 'config'"),
+        )
+        reason = maxcompute_gating.preflight_reason()
+        assert "did not resolve a credential" in reason
+        assert "cannot run before contacting" not in reason
+
+    def test_marker_classification_is_narrow(self):
+        for message in [
+            "ModuleNotFoundError: No module named 'dbt'",
+            "ImportError: cannot import name x",
+        ]:
+            assert maxcompute_gating.is_dependency_failure(message), message
+        for message in [
+            "[Errno 111] Connection refused",
+            "ODPS-0110061: Invalid database operations on two-tier model",
+            "Client.get_credentials() missing 1 required positional argument",
+            # 服务端也会说 "not found"，不能被当成缺依赖
+            "ODPS-0420111: Project not found - nope",
+            "ODPS-0130131:[5,16] Table not found - this_relation_does_not_exist",
+        ]:
+            assert not maxcompute_gating.is_dependency_failure(message), message
+
+    def test_server_side_not_found_is_not_called_a_dependency_problem(self, tmp_path, monkeypatch):
+        """负对照：服务端报 Project not found 时，判据仍走"连不上/配置不对"那条。"""
+        self._profile(tmp_path, monkeypatch)
+        self._probe_raises(monkeypatch, Exception("ODPS-0420111: Project not found - nope"))
+        reason = maxcompute_gating.preflight_reason()
+        assert "cannot run before contacting" not in reason
+        assert "not reachable" in reason
