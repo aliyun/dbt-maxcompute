@@ -129,7 +129,15 @@ echo "target:  ${TARGET}"
 # 2. preflight: credentials, three-tier project, reachability
 # --------------------------------------------------------------------------
 SUMMARY="executed=0 passed=0 failed=0 errors=0 skipped=0"
-if ! REASON="$("$PYTHON" "$GATE" preflight 2>&1)"; then
+# The verdict line is stdout only.  A credential chain that walks every provider
+# can also throw thousands of lines of traceback at stderr, and that belongs in a
+# file - not in the one sentence that tells someone why nothing ran.
+PREFLIGHT_ERR="${TEMP_DIR}/preflight.err"
+if ! REASON="$("$PYTHON" "$GATE" preflight 2>"$PREFLIGHT_ERR")"; then
+  if [ -z "$REASON" ]; then
+    REASON="$(tail -n 1 "$PREFLIGHT_ERR" 2>/dev/null)"
+    [ -n "$REASON" ] || REASON="preflight failed without printing a reason (see preflight.err)"
+  fi
   echo "INTEGRATION: BLOCKED (no cases were executed)"
   echo "reason:      ${REASON}"
   echo "not a pass:  the SQL regression did not reach a MaxCompute project"
