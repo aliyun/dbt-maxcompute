@@ -249,3 +249,99 @@ def test_preflight_uses_the_same_credentials_as_the_adapter(monkeypatch, auth_co
     assert maxcompute_gating.odps_client(profile) is expected_client
     for key, value in auth_config.items():
         assert getattr(captured[0], key) == value
+
+
+class TestPreflightVerdict:
+    """A blocked preflight has to name the right problem, in one line."""
+
+    @staticmethod
+    def _chain_profile_with_env_keys(tmp_path, monkeypatch):
+        write_profile(tmp_path, monkeypatch, PROFILE_BODY + "auth_type: chain\n")
+        monkeypatch.setenv("ALIBABA_CLOUD_ACCESS_KEY_ID", "id-value")
+        monkeypatch.setenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET", "secret-value")
+
+    @staticmethod
+    def _probe_raises(monkeypatch, error):
+        def boom(*args, **kwargs):
+            raise error
+
+        monkeypatch.setattr(maxcompute_gating, "odps_client", boom)
+
+    def test_unresolved_credential_is_called_a_credential_problem(self, tmp_path, monkeypatch):
+        """What pyodps surfaces when the chain finds nothing: a TypeError from its own
+        ``get_credentials()`` fallback, not a network error."""
+        self._chain_profile_with_env_keys(tmp_path, monkeypatch)
+        self._probe_raises(
+            monkeypatch,
+            TypeError("Client.get_credentials() missing 1 required positional argument: 'config'"),
+        )
+        reason = maxcompute_gating.preflight_reason()
+        assert reason is not None
+        assert "did not resolve a credential" in reason
+        assert "not reachable" not in reason
+
+    def test_unreachable_project_is_not_called_a_credential_problem(self, tmp_path, monkeypatch):
+        self._chain_profile_with_env_keys(tmp_path, monkeypatch)
+        self._probe_raises(monkeypatch, OSError("[Errno 111] Connection refused"))
+        reason = maxcompute_gating.preflight_reason()
+        assert "not reachable" in reason
+        assert "did not resolve a credential" not in reason
+
+    def test_two_tier_project_keeps_its_own_verdict(self, tmp_path, monkeypatch):
+        self._chain_profile_with_env_keys(tmp_path, monkeypatch)
+        self._probe_raises(
+            monkeypatch,
+            Exception(
+                "ODPS-0110061: Failed to run ddltask - Invalid database operations on two-tier model"
+            ),
+        )
+        reason = maxcompute_gating.preflight_reason()
+        assert "three-tier" in reason
+        assert "credential" not in reason
+
+    def test_verdict_is_one_bounded_line_even_for_a_traceback_like_message(
+        self, tmp_path, monkeypatch
+    ):
+        self._chain_profile_with_env_keys(tmp_path, monkeypatch)
+        noisy = "\n".join(
+            ["Traceback (most recent call last):"]
+            + [f"  frame {i}" for i in range(800)]
+            + ["RuntimeError: credentials provider failed"]
+        )
+        self._probe_raises(monkeypatch, Exception(noisy))
+        reason = maxcompute_gating.preflight_reason()
+        assert "\n" not in reason
+        assert len(reason) < 480
+        assert "credentials" in reason
+
+    def test_credential_logging_is_quieted_only_for_the_probe(self, tmp_path, monkeypatch):
+        import logging
+
+        self._chain_profile_with_env_keys(tmp_path, monkeypatch)
+        logger = logging.getLogger("alibabacloud_credentials")
+        previous = logger.level
+        seen = {}
+
+        def probe(*args, **kwargs):
+            seen["during"] = logger.level
+            return type("C", (), {"list_schemas": lambda self, project="p": iter([])})()
+
+        monkeypatch.setattr(maxcompute_gating, "odps_client", probe)
+        assert maxcompute_gating.preflight_reason() is None
+        assert seen["during"] == logging.CRITICAL
+        assert logging.getLogger("alibabacloud_credentials").level == previous
+
+    def test_marker_classification_is_narrow(self):
+        for message in [
+            "Refresh credentials failed, cached value is None",
+            "InvalidAccessKeyId.NotFound",
+            "SignatureDoesNotMatch",
+            "Client.get_credentials() missing 1 required positional argument",
+        ]:
+            assert maxcompute_gating.is_credential_failure(message), message
+        for message in [
+            "[Errno 111] Connection refused",
+            "ODPS-0110061: Invalid database operations on two-tier model",
+            "Name or service not known",
+        ]:
+            assert not maxcompute_gating.is_credential_failure(message), message
