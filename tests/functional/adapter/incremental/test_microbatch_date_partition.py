@@ -1,6 +1,7 @@
 """The window is attached to the *upstream* relation, and the refusal of a DATE event column.
 
-Two things the repository had not pinned before, both from the 87422681 investigation:
+Two things the repository had not pinned before, both surfaced by a DATE-typed event
+column that silently selected zero rows in every batch:
 
 * where the batch predicate is applied - dbt-core resolves `event_time` on the relation being read
   and wraps *that* one, so a `cast()` inside the microbatch model's own SELECT is applied after the
