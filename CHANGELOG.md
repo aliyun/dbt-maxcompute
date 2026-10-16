@@ -73,12 +73,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   00:00:00+00:00'`); MaxCompute compares that against `timestamp` columns but
   refuses it for `datetime` ones, whose string form is `yyyy-mm-dd hh:mi:ss`
   exactly, so every batch failed while the physical plan was generated. The
-  boundary is now stated without the offset suffix - and only where the session
-  clock reads UTC, so the window denotes the same instant. Sessions pinned to
-  another zone are untouched, and microseconds are kept rather than rounded:
-  a `datetime` column rejects fractional seconds too, so a `--sample` window
-  against one still fails to compile instead of silently changing the window.
-  See `docs/microbatch-support.md`.
+  boundary is now stated without the offset suffix, and microseconds are kept
+  rather than rounded: a `datetime` column rejects fractional seconds too, so a
+  `--sample` window against one still fails to compile instead of silently
+  changing the window. See `docs/microbatch-support.md`.
+- Microbatch models on a profile that pins a non-UTC `timezone` no longer lose
+  rows between adjacent batches. MaxCompute parses a timestamp string on the
+  session timezone while the batch's partitions come from `trunc_time()`, which
+  cuts UTC, so a `timezone: Asia/Shanghai` profile shifted every window eight
+  hours into its neighbour's partition and the later `insert overwrite` erased
+  rows the earlier batch had written - with the run reporting success. The
+  boundary is now stated as the session's own reading of the same instant, so
+  the window and the partition key are cut by one clock; where this cannot state
+  the session clock (nothing pinned, a value that is not a zone name, or a name
+  the host cannot resolve) the window is left exactly as dbt-core rendered it.
 
 ## [1.11.3b3] — 2026-08-26
 
