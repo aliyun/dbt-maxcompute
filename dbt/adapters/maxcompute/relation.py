@@ -174,6 +174,7 @@ class MaxComputeRelation(BaseRelation):
             return base
 
         parts = []
+        readings = []
         for boundary, operator in (
             (event_time_filter.start, ">="),
             (event_time_filter.end, "<"),
@@ -184,7 +185,28 @@ class MaxComputeRelation(BaseRelation):
             if text is None:
                 # A session clock this cannot state the window on: leave dbt-core's rendering alone.
                 return base
+            readings.append(text)
             parts.append(f"{event_time_filter.field_name} {operator} '{text}'")
+
+        if len(readings) == 2 and readings[0] == readings[1]:
+            # Two different instants, one wall clock: the session is inside a DST fold, and a
+            # half-open window cannot be stated there at all. The batch will select nothing and
+            # write nothing - and whether the hour it was meant to cover is written by its
+            # neighbour depends on which side of the fold the server resolves the repeated text
+            # to, which differs by zone (measured: America/New_York picks the earlier instant,
+            # Australia/Sydney the later one, so there the hour is written by no batch). Saying
+            # nothing while a batch writes nothing is the silence this file exists to remove.
+            logger.warning(
+                "The session timezone %r reads both ends of this microbatch window as the same "
+                "wall clock (%s), so this batch selects no rows and writes nothing. That happens once "
+                "per "
+                "daylight-saving fold with `batch_size: hour`, and the hour it was meant to cover "
+                "may end up written by the next batch or by no batch at all, depending on how the "
+                "server resolves the repeated text. For hour-granularity models, leave `timezone` "
+                "unset (the session then runs on UTC) or pin a fixed-offset zone; a coarser "
+                "`batch_size` also avoids the repeated hour."
+                % (options.local_timezone, readings[0])
+            )
 
         return " and ".join(parts) if parts else base
 

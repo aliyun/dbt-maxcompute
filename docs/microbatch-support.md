@@ -167,6 +167,34 @@ decision to make deliberately rather than as part of a bug fix.
 If the profile's `timezone` cannot be resolved on the host running dbt, the window is left as
 dbt-core rendered it and a warning is logged: a guessed shift is worse than the known behaviour.
 
+### The one thing a wall clock cannot state: the fold hour
+
+Stating a boundary as the session's wall clock is only unambiguous while that clock maps one-to-one
+onto instants. Where a zone *repeats* an hour, two UTC boundaries read the same, and a half-open
+window cannot be written there. Measured on a real project, session `America/New_York`, hour
+batches on the fold day:
+
+| UTC boundary batch | rendered window | what the server does with it |
+| --- | --- | --- |
+| `[05:00Z, 06:00Z)` | `>= '2025-11-02 01:00:00' and < '2025-11-02 01:00:00'` | a degenerate window: selects nothing, and an `insert overwrite` of no rows writes no partition, so nothing is erased |
+| `[06:00Z, 07:00Z)` | `>= '2025-11-02 01:00:00' and < '2025-11-02 02:00:00'` | `'01:00:00'` resolves to the *first* 01:00 (measured: equal to 05:00Z, not to 06:00Z), so this batch covers both hours |
+| `[07:00Z, 08:00Z)` | `>= '2025-11-02 02:00:00' and < '2025-11-02 03:00:00'` | normal |
+
+Which batch ends up covering the repeated hour depends on which instant the server picks for that
+text, and that is not the same everywhere. Measured on the same project with a session of
+`Australia/Sydney` (local `02:00` repeated on 2025-04-06, the two instants being 15:00Z and 16:00Z),
+the text resolves to the **later** instant: the earlier batch's window is empty *and* the hour
+`[15:00Z, 16:00Z)` is written by neither batch. In `America/New_York` the text resolves to the
+**earlier** instant, so the following batch covers both hours and nothing is lost.
+
+So at a fold, `batch_size: hour` in a DST-observing session either double-covers or drops that one
+hour, depending on the zone. Not row loss on the scale the offset misalignment caused, and not
+silent: the adapter logs a warning whenever a window's two ends render to the same wall clock, which
+is exactly that batch. The clean answer is a session without repeated hours - leave `timezone`
+unset (UTC) or pin a fixed-offset zone - and day-granularity batches avoid the case entirely in the
+zones measured here, where a UTC midnight boundary is 20:00/19:00 in New York and midnight in
+Sydney, never the folded hour.
+
 ## Not verified here
 
 - Python (MaxFrame) microbatch models, which apply the window to the returned DataFrame instead of
@@ -177,9 +205,10 @@ dbt-core rendered it and a warning is logged: a guessed shift is worse than the 
   name that is not in any tz database): the window stays as dbt-core rendered it, offset suffix
   included, so such a column still refuses to compile there;
 - `dbt retry` for a model whose *first* batch fails.
-- Hour-granularity batches whose boundary falls in a timezone's DST gap or fold. The shift is
-  computed per boundary against the profile's zone, and the offline tests cover an EDT/EST zone,
-  but no real run on a DST-affected project has pinned it.
+- Hour-granularity batches in DST-observing sessions, beyond the two zones above: 144 hourly
+  boundaries over six (zone, day) pairs were read back through the server and round-tripped except
+  the two fold instants described. Half-hour and 45-minute offsets, zones not measured here, and a
+  fold landing exactly on a day-granularity boundary have not been checked.
 - `microbatch` models whose event time is `timestamp_ntz` or `date` under a non-UTC `timezone`, and
   Python (MaxFrame) models on a non-UTC session - see the table above for why the first two are not
   aligned by this, and note that the MaxFrame path filters the returned DataFrame in Python rather

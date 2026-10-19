@@ -151,3 +151,62 @@ class TestSessionsThatCannotBeStatedKeepDbtsRendering:
     ):
         options.local_timezone = "Not/AZone"
         assert "+00:00" in _render()
+
+
+class TestDSTFoldWindowIsMadeVisible:
+    """A fold hour cannot be stated as a half-open wall-clock window; the batch must say so.
+
+    Measured on a real project (2025-11-02, a session that pinned `America/New_York`): the UTC
+    boundary 05:00Z and the boundary 06:00Z are both ``01:00:00`` on that wall clock, the server
+    resolves ``01:00:00`` to the earlier instant, and the 05:00Z batch therefore renders as an
+    empty window. Writing nothing is the safe half of this - the next batch covers both hours -
+    but a batch that silently writes nothing is the shape of the original bug, so it is logged.
+    """
+
+    def test_the_fold_hour_renders_an_empty_window_and_warns(self, session_clock, monkeypatch):
+        from dbt.adapters.maxcompute import relation as relation_module
+
+        seen = []
+        monkeypatch.setattr(
+            relation_module.logger, "warning", lambda message: seen.append(message)
+        )
+        options.local_timezone = "America/New_York"
+        assert _render(
+            start=datetime(2025, 11, 2, 5, tzinfo=pytz.UTC),
+            end=datetime(2025, 11, 2, 6, tzinfo=pytz.UTC),
+        ) == _window("2025-11-02 01:00:00", "2025-11-02 01:00:00")
+        assert len(seen) == 1 and "selects no rows" in seen[0]
+
+    def test_the_other_zones_fold_collapses_the_same_way(self, session_clock, monkeypatch):
+        """Sydney's fold repeats a *different* local hour, and collapses the same way.
+
+        Which side of the fold the server resolves the repeated text to differs by zone (measured:
+        New York takes the earlier instant, Sydney the later one), so only the empty-window half of
+        this behaviour is stateable without a server - which is also the half the warning covers.
+        """
+        from dbt.adapters.maxcompute import relation as relation_module
+
+        seen = []
+        monkeypatch.setattr(
+            relation_module.logger, "warning", lambda message: seen.append(message)
+        )
+        options.local_timezone = "Australia/Sydney"
+        assert _render(
+            start=datetime(2025, 4, 5, 15, tzinfo=pytz.UTC),
+            end=datetime(2025, 4, 5, 16, tzinfo=pytz.UTC),
+        ) == _window("2025-04-06 02:00:00", "2025-04-06 02:00:00")
+        assert len(seen) == 1 and "Australia/Sydney" in seen[0]
+
+    def test_a_normal_hour_does_not_warn(self, session_clock, monkeypatch):
+        from dbt.adapters.maxcompute import relation as relation_module
+
+        seen = []
+        monkeypatch.setattr(
+            relation_module.logger, "warning", lambda message: seen.append(message)
+        )
+        options.local_timezone = "America/New_York"
+        _render(
+            start=datetime(2025, 11, 2, 7, tzinfo=pytz.UTC),
+            end=datetime(2025, 11, 2, 8, tzinfo=pytz.UTC),
+        )
+        assert seen == []
