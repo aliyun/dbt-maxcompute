@@ -12,7 +12,7 @@ The regressions that hold these statements in place live in
 | --- | --- |
 | `test_incremental.py::TestMicrobatchMaxCompute` | upstream's microbatch contract, on this warehouse |
 | `test_microbatch_window_semantics.py` | windows, replay, empty window, late data, duplicate keys, rejected configurations |
-| `test_microbatch_partition_timezone.py` | the session-timezone dependency described below |
+| `test_microbatch_partition_timezone.py` | the window/partition clock pairing: a UTC session, `timezone: Asia/Shanghai`, a negative/DST zone, and a `datetime` column on a shifted session |
 | `test_microbatch_datetime_event_column.py` | the shape of a batch boundary, and which event-column types can be compared against it |
 | `test_microbatch_failure_retry.py` | what survives a batch that fails, and what `dbt retry` replays |
 
@@ -93,9 +93,12 @@ Two edges are kept visible rather than smoothed over:
   different window on the two types that do accept fractions. Batch boundaries themselves never
   carry a sub-second value: dbt-core aligns every boundary to `batch_size`, and the finest grain is
   an hour.
-* **A profile that pins a non-UTC `timezone` is not changed here.** There the window has to be
-  shifted onto that clock as well, which is the subject of the next section; on such a session a
-  `datetime` column keeps failing outright, exactly as it does today.
+* **Both halves are one rule.** Stating the boundary as the session's own reading of the instant -
+  which is what the next section is about - is also what makes the text parseable here: on a
+  session that pinned `Asia/Shanghai` a `datetime` column reads `'2025-05-01 08:00:00'` for the UTC boundary
+  `2025-05-01 00:00:00+00:00`, so it both compiles and lands on its own partition
+  (`TestMicrobatchDatetimeColumnOnShiftedSession`). What still refuses to compile is a boundary with
+  fractional seconds, for the reason above.
 
 ## Requirements, and who enforces them
 
@@ -115,28 +118,100 @@ set. For key-based updates use `merge` or `delete+insert`. (The example models i
 used to state that a missing `unique_key` raises a compiler error; it does not, and the comment is
 corrected in the same change as this page.)
 
-## The session timezone decides whether a window maps onto one partition
+## The batch window is compared on the session clock, the partition key on UTC
 
 dbt renders the window as a timestamp string carrying an offset - `event_time >=
 '2025-05-01 00:00:00+00:00'` - and MaxCompute evaluates that comparison on the **session** timezone
 (measured: `+00:00`, `+08:00` and `-05:00` on the same wall clock select the same rows). The
 partition a row lands in comes from `trunc_time(<field>, '<granularity>')`, which cuts on **UTC**.
-Those two clocks have to agree, and what makes them agree is the session timezone:
 
-* `MaxComputeCredentials._get_odps` sets pyodps' `local_timezone` to false when the profile omits
-  `timezone`, and pyodps then submits `odps.sql.timezone=Etc/GMT` with every statement;
-* with that default, one day window maps onto exactly one partition and two adjacent windows never
-  touch the same partition;
-* with `timezone: Asia/Shanghai` in the profile, the same fixtures behave differently: the window is
-  read on the session clock while `trunc_time()` keeps cutting UTC days, rows before 08:00 local
-  belong to the previous partition day, one "day" window covers two partitions, and the next
-  window's overwrite erases rows the earlier window had written. The run reports success.
+What sets the session timezone is the profile: `MaxComputeCredentials._get_odps` writes pyodps'
+`local_timezone`, and pyodps submits it as `odps.sql.timezone` with every statement - `Etc/GMT`
+when the profile omits `timezone`. On that default both clocks read UTC, so nothing needs
+correcting. A profile that *does* set `timezone` used to move one clock and not the other: a "day"
+window reached into its neighbour's partition, and the later `insert overwrite` erased rows the
+earlier window had written, while the run reported success.
 
-So `timezone` in the profile is not a display option as far as `microbatch` is concerned: it changes
-which rows survive. Until the two clocks are reconciled in code - or the combination is refused at
-compile time - **leave `timezone` unset for projects whose models use `microbatch`**.
-`TestMicrobatchProfileTimezone` pins the failing combination as `xfail(strict=True)`, so it starts
-reporting an error the moment the behaviour changes and can be deleted deliberately.
+`session_boundary_text` (used by `MaxComputeRelation._render_event_time_filtered`) now states each
+boundary in the session's own reading of the same UTC instant - `2025-05-01 00:00:00+00:00` becomes
+`'2025-05-01 08:00:00'` under `timezone: Asia/Shanghai` - which the server parses back into that
+instant, so the window and the partition key are cut by the same clock. The same call also drops the
+offset suffix, so this is one rule, not two: state the instant the way this session will read it
+back, and the text is both on the right clock and in a shape every time type can compare. Two
+properties of that rendering are deliberate:
+
+* on a UTC session the two readings are the *same text*, so this shift moves nothing there - that
+  path had already changed once, when the offset suffix was dropped (#40), and it changes again only
+  in the sense that the same suffix-free string is now produced by one rule instead of a branch;
+* the boundary stays a plain string literal. The alternative spelling of the same instant,
+  `from_utc_timestamp(...)`, evaluates to a `TIMESTAMP`, and MaxCompute refuses to compare a
+  `TIMESTAMP` with a `DATETIME` or `DATE` operand instead of converting it (measured) - so that form
+  would trade a working query for a compile error on some models. It would also replace a constant
+  with a function call in the predicate, and whether the optimizer still prunes the source with a
+  non-constant boundary has not been measured here.
+
+### Which event-time types this aligns, and which it cannot
+
+| `partition_by.data_type` | window vs partition with a non-UTC `timezone` |
+| --- | --- |
+| `timestamp`, `datetime` | aligned - the shift is derived from the session clock |
+| `timestamp_ntz` | **worse, not merely unaligned** - a naive column has no clock, so shifting its boundary moves rows that today land inside their own batch into the neighbouring batch's window. Measured end to end (day batches, `timezone: Asia/Shanghai`, four rows at 01:00 and 23:00 UTC on two days): the first window writes *two* partitions, the second window's `insert overwrite` then erases the row the first one wrote, and replaying the first window erases one of the second's. The same model on `master`, where the window is not shifted, loses nothing - its batches simply follow the naive local day (measured 2026-10-20) |
+| `date` | unusable either way - comparing a `DATE` with a timestamp string yields `NULL`, so no row falls in any window (measured) |
+
+The window is rendered from an event-time filter that carries a field name and two instants - no
+column type - and the relation it is rendered on is not given one either, which is why these three
+cases are indistinguishable today where the boundary is written. That is this adapter's construction,
+not a limit dbt imposes: the model's own declared `partition_by` - already the thing that decides
+whether a table is auto-partitioned at all - does reach the point where the relation is built. So
+narrowing the shift to the types it helps, or refusing the combination outright, are both implementable
+here; both also hinge on a declaration rather than on the column's physical type, and a declaration
+that disagrees with the data is a case not measured here. Either way that is a product decision about
+which contract to keep, so this pull request documents the behaviour instead of making it. Until one
+of them lands, a `microbatch` model partitioned on `timestamp_ntz` or `date` should keep `timezone`
+unset - the measurement above is why that advice is not cosmetic: for `timestamp_ntz` on a non-UTC
+session the shift is not a no-op, it takes a combination that drops no rows today and gives it the
+very failure this pull request fixes.
+
+If the profile's `timezone` cannot be resolved on the host running dbt, the window is left as
+dbt-core rendered it and a warning is logged: a guessed shift is worse than the known behaviour.
+
+A `set odps.sql.timezone=...;` written inside a model does **not** move the clock the window is
+stated on, so it cannot be used to work around a wrong `timezone`. The adapter turns leading `set`
+statements into per-statement hints, and measured on a real project in both directions - profile on
+UTC with a statement asking for `Asia/Shanghai`, and the reverse - the value pyodps submits from the
+profile wins: the session parses timestamp strings with it, and `session_boundary_text` shifts the
+window with the same value. The two therefore cannot drift apart. What a statement-level override
+loses is its own effect on timestamp parsing, which is a separate question from this strategy. (A
+statement-level value does apply when nothing is pinned globally; this adapter always pins the
+profile's value, including `Etc/GMT` for an unset `timezone`.)
+
+### The one thing a wall clock cannot state: the fold hour
+
+Stating a boundary as the session's wall clock is only unambiguous while that clock maps one-to-one
+onto instants. Where a zone *repeats* an hour, two UTC boundaries read the same, and a half-open
+window cannot be written there. Measured on a real project, session `America/New_York`, hour
+batches on the fold day:
+
+| UTC boundary batch | rendered window | what the server does with it |
+| --- | --- | --- |
+| `[05:00Z, 06:00Z)` | `>= '2025-11-02 01:00:00' and < '2025-11-02 01:00:00'` | a degenerate window: selects nothing, and an `insert overwrite` of no rows writes no partition, so nothing is erased |
+| `[06:00Z, 07:00Z)` | `>= '2025-11-02 01:00:00' and < '2025-11-02 02:00:00'` | `'01:00:00'` resolves to the *first* 01:00 (measured: equal to 05:00Z, not to 06:00Z), so this batch covers both hours |
+| `[07:00Z, 08:00Z)` | `>= '2025-11-02 02:00:00' and < '2025-11-02 03:00:00'` | normal |
+
+Which batch ends up covering the repeated hour depends on which instant the server picks for that
+text, and that is not the same everywhere. Measured on the same project with a session of
+`Australia/Sydney` (local `02:00` repeated on 2025-04-06, the two instants being 15:00Z and 16:00Z),
+the text resolves to the **later** instant: the earlier batch's window is empty *and* the hour
+`[15:00Z, 16:00Z)` is written by neither batch. In `America/New_York` the text resolves to the
+**earlier** instant, so the following batch covers both hours and nothing is lost.
+
+So at a fold, `batch_size: hour` in a DST-observing session either double-covers or drops that one
+hour, depending on the zone. Not row loss on the scale the offset misalignment caused, and not
+silent: the adapter logs a warning whenever a window's two ends render to the same wall clock, which
+is exactly that batch. The clean answer is a session without repeated hours - leave `timezone`
+unset (UTC) or pin a fixed-offset zone - and day-granularity batches avoid the case entirely in the
+zones measured here, where a UTC midnight boundary is 20:00/19:00 in New York and midnight in
+Sydney, never the folded hour.
 
 ## Not verified here
 
@@ -144,6 +219,18 @@ reporting an error the moment the behaviour changes and can be deleted deliberat
   to the compiled SQL;
 - `batch_size` of `month` or `year`, and how their units interact with `trunc_time()`;
 - `partitions`, `lookback`, `on_schema_change`, `grants` and model contracts on microbatch models;
-- `datetime` event columns on a profile that pins a non-UTC `timezone`: the window has to be
-  shifted onto that clock first, and the refusal above is what was measured today;
+- `datetime` event columns on a session whose zone this adapter cannot resolve (nothing pinned, or a
+  name that is not in any tz database): the window stays as dbt-core rendered it, offset suffix
+  included, so such a column still refuses to compile there;
 - `dbt retry` for a model whose *first* batch fails.
+- Hour-granularity batches in DST-observing sessions, beyond the two zones above: 144 hourly
+  boundaries over six (zone, day) pairs were read back through the server and round-tripped except
+  the two fold instants described. Half-hour and 45-minute offsets, zones not measured here, and a
+  fold landing exactly on a day-granularity boundary have not been checked.
+- `microbatch` models whose event time is a `date` column under a non-UTC `timezone`: the row-sifting
+  comparison itself is unmeasured there, since no row falls inside any window on any session
+  (`timestamp_ntz` under a non-UTC session is no longer in this list - it was measured end to end on
+  2026-10-20, and the outcome is in the table above: the shift drops rows it does not drop on
+  `master`). Also unmeasured: `timestamp_ntz` on a *negative*-offset session or with `batch_size: hour`,
+  and Python (MaxFrame) models on a non-UTC session - the MaxFrame path filters the returned DataFrame
+  in Python rather than in SQL, so it does not go through this rendering at all.
