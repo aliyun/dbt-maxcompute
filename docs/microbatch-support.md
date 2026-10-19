@@ -14,6 +14,7 @@ The regressions that hold these statements in place live in
 | `test_microbatch_window_semantics.py` | windows, replay, empty window, late data, duplicate keys, rejected configurations |
 | `test_microbatch_partition_timezone.py` | the session-timezone dependency described below |
 | `test_microbatch_datetime_event_column.py` | the shape of a batch boundary, and which event-column types can be compared against it |
+| `test_microbatch_date_partition.py` | a `date` event column is refused, and the replacement that works |
 | `test_microbatch_failure_retry.py` | what survives a batch that fails, and what `dbt retry` replays |
 
 ## How a batch is written
@@ -83,7 +84,8 @@ only the suffix-free form.
 
 `date` does not appear above because no text in it compares: a `date` event column yields NULL
 against all three, so every batch selects nothing while the run still reports success. That is a
-different defect from this one, and pull request #39 proposes refusing it at compile time.
+different defect from this one - a silent empty target rather than a plan the server refuses - and it
+is refused at compile time below, because no rendering fix can tell the two types apart.
 
 Two edges are kept visible rather than smoothed over:
 
@@ -102,6 +104,7 @@ Two edges are kept visible rather than smoothed over:
 | Combination | Outcome | Enforced by |
 | --- | --- | --- |
 | no `partition_by` | rejected: "The 'microbatch' strategy requires a `partition_by` config." | this adapter |
+| `event_time` declared as `partition_by.data_type: date` | rejected: "cannot batch on a `date` event column" | this adapter |
 | `partition_by.granularity` != `batch_size` | rejected: "requires a `partition_by` config with the same granularity as its configured `batch_size`" | this adapter |
 | no `event_time` | rejected during parsing: "Microbatch model '<name>' must provide an 'event_time' (string) config" | dbt-core |
 | no `batch_size` | rejected during parsing | dbt-core |
@@ -114,6 +117,78 @@ Read the last two lines before relying on `unique_key`: a batch is a partition o
 set. For key-based updates use `merge` or `delete+insert`. (The example models in this repository
 used to state that a missing `unique_key` raises a compiler error; it does not, and the comment is
 corrected in the same change as this page.)
+
+## A `date` event column cannot match a batch window
+
+`partition_by` with `data_type: date` is refused for `microbatch`, and it is worth knowing why the
+refusal is the only safe shape. dbt-core compares each batch as
+
+```sql
+event_time >= '2025-05-01 00:00:00+00:00' and event_time < '2025-05-02 00:00:00+00:00'
+```
+
+and since #40 this adapter submits the suffix-free form whenever the session clock reads UTC, i.e.
+`>= '2025-05-01 00:00:00'`. Neither of those two texts is converted against a `DATE` column, and
+neither complains - the comparison evaluates to `NULL`. No row satisfies a `NULL` predicate, so every batch selects nothing;
+an empty `insert overwrite` changes nothing; and the run reports the model as a success with the
+target left empty. Measured on a real project with four rows spanning two days: `PASS=2`, zero rows
+in the target, and the same `NULL` in `Etc/GMT`, `Asia/Shanghai` and `Etc/GMT+8` sessions alike. This
+is therefore not the session-clock problem below: the comparison is null-valued whatever the clock.
+
+Writing the boundary as a bare `'YYYY-MM-DD'` *does* work for a `DATE` column - measured, it selects
+the day's rows - but it cannot be what this adapter renders, because the point where the boundary is
+written (dbt-core's `Relation.render_event_time_filtered`) is handed a field name, not a column type,
+and the date-only text is not safe for the types that work today:
+
+Each cell is the comparison as the server evaluates it, in a `Etc/GMT` and an `Asia/Shanghai`
+session alike - the third column is the shape a DATE needs, the fourth is what a rendering point that
+cannot see the column type would have to emit to cover both:
+
+| `event_time` column | `'2025-05-01 00:00:00'` (what this adapter submits on a UTC session since #40) | `'2025-05-01 00:00:00+00:00'` (what dbt-core renders) | `'2025-05-01'` | naive text OR date-only |
+| --- | --- | --- | --- | --- |
+| `date` | `NULL` - batch selects nothing | `NULL` - batch selects nothing | selects its day | selects its day |
+| `datetime` | selects its day | **ODPS-0130071** | **ODPS-0130071** | **ODPS-0130071** |
+| `timestamp` | selects its day | selects its day | `NULL` - batch selects nothing | selects its day |
+| `timestamp_ntz` | selects its day | selects its day | `NULL` - batch selects nothing | selects its day |
+
+So no type-blind rendering exists: the date-only text either silently empties a model (`timestamp`,
+`timestamp_ntz`) or stops it compiling (`datetime`), and OR-ing the two texts inherits the DATETIME
+failure. The combination is refused at compile time instead, in `mc_validate_microbatch_config`,
+keyed on the declared `partition_by.data_type` - the one signal that is available there.
+
+The `datetime` half of that reading is closed: #40 (master `9fbaa8e`) renders the boundary without
+the offset suffix on a UTC session, so a `datetime` event column runs on the default profile while
+`timestamp` and `timestamp_ntz` keep selecting the rows they selected before. What #40 did not do is
+make a `DATE` column comparable - it refuses both texts, which is the difference between the second
+and third columns of the table above. A `datetime` column on a profile that pins a non-UTC `timezone`
+is still open and belongs to the session-timezone section below (pull request #38): there the window
+has to be moved onto that clock as well, and stripping only the suffix would silently change which
+rows are selected.
+
+**What to write instead.** The window is attached to the *upstream* relation - dbt-core wraps every
+ref or source that declares `event_time` - so it is that column which has to stop being a DATE. Cast
+it where the upstream model is built, declare `event_time` on the resulting instant column, and
+partition the microbatch model on it with `data_type: timestamp`. Measured end to end
+(`test_microbatch_date_partition.py`): two adjacent day windows write their own rows into their own
+partitions, and replaying the first window does not erase the second.
+
+Two shapes that look like fixes and are measured not to be:
+
+* a `cast()` inside the microbatch model's own SELECT - the batch predicate was already applied to
+  the upstream DATE column, so the target is still empty and the run still succeeds;
+* `cast(event_date as datetime)`, and making the DATE column itself the partition key. This
+  warehouse refuses the DATE->DATETIME cast, and partition keys must be `BIGINT` or `STRING`.
+
+The refusal catches the shape the adapter can see - the model that declares its event field as a
+`date` partition column. An *upstream* relation whose `event_time` column is a DATE is not visible
+from here (only the field name reaches the rendering point) and stays silent; that residual is
+pinned as a failing-behaviour test rather than left to be rediscovered.
+
+The workaround is measured on the adapter's default session (`timezone` unset, so
+`odps.sql.timezone=Etc/GMT`). Under a profile that sets `timezone`, the DATE->TIMESTAMP reading is
+taken on the session clock (`2025-05-01` reads as `2025-04-30 16:00:00` UTC in an `Asia/Shanghai`
+session) and lands on the previous partition day: that is the session-timezone problem below, not a
+new one.
 
 ## The session timezone decides whether a window maps onto one partition
 
@@ -144,6 +219,11 @@ reporting an error the moment the behaviour changes and can be deleted deliberat
   to the compiled SQL;
 - `batch_size` of `month` or `year`, and how their units interact with `trunc_time()`;
 - `partitions`, `lookback`, `on_schema_change`, `grants` and model contracts on microbatch models;
-- `datetime` event columns on a profile that pins a non-UTC `timezone`: the window has to be
-  shifted onto that clock first, and the refusal above is what was measured today;
-- `dbt retry` for a model whose *first* batch fails.
+- `dbt retry` for a model whose *first* batch fails;
+- whether an upstream `event_time` column can be seen when the source of the rows is a `source:`
+  rather than a dbt model - the DATE-typed upstream is least avoidable there, and this page's
+  residual is measured on a dbt model;
+- the instant-cast workaround for a `date` column under a profile that sets `timezone` (see the
+  session-timezone section);
+- `datetime` event columns on a profile that pins a non-UTC `timezone`: the window has to be shifted
+  onto that clock first, which is the change described in the session-timezone section below.

@@ -90,6 +90,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against one still fails to compile instead of silently changing the window.
   See `docs/microbatch-support.md`.
 
+- Microbatch models that declare their event column as a `date` partition field are now refused
+  at compile time instead of running empty. dbt-core compares each batch against a timestamp-shaped
+  boundary (`event_time >= '2025-05-01 00:00:00'` since #40, with an offset before it), and
+  MaxCompute evaluates a `DATE` against either text as `NULL` rather than raising: every batch
+  selected zero rows, the `insert overwrite` of an empty query changed nothing, and `dbt run`
+  reported the model as a success with the target left empty. Measured on a real project - four
+  source rows across two days, `PASS=2`, zero rows - in `Etc/GMT`, `Asia/Shanghai` and `Etc/GMT+8`
+  sessions alike, so no session clock can line the two up. Rendering a date-only boundary would fix
+  that comparison but cannot be done where the boundary is written: that point is handed a field
+  name, not a column type, and the date-only text is measured to be refused outright by a `datetime`
+  column and to evaluate to `NULL` for `timestamp` and `timestamp_ntz`, i.e. it would empty or break
+  the models that work today. The error names the replacement, which is measured end to end: expose
+  the event column as an instant *in the relation the window is applied to* (a `cast()` inside the
+  microbatch model's own SELECT is too late) and partition on it as `timestamp`.
+  See `docs/microbatch-support.md`.
+
 ## [1.11.3b3] — 2026-08-26
 
 ### Fixed

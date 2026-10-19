@@ -318,6 +318,24 @@ class TestMicrobatchWithoutBegin(_MicrobatchConfigCase):
     expected = "must provide a 'begin'"
 
 
+class TestMicrobatchDatePartitionedEventColumn(_MicrobatchConfigCase):
+    """A `microbatch` model whose event column is declared as a partition `date`.
+
+    dbt compares the batch boundary as text (`event_time >= '2025-05-01 00:00:00+00:00'`) and this
+    warehouse evaluates DATE against that text as NULL instead of raising - so every batch would
+    select zero rows and the run would still report an empty target as a success. The refusal keys
+    off the declared `data_type`, which is the only signal available where the boundary is rendered;
+    the empty-target behaviour itself is measured on a real DATE column in
+    `test_microbatch_date_partition.py`.
+    """
+
+    case = "date_event_column"
+    model_sql = _config_case(
+        partition_by="{'field': 'event_time', 'data_type': 'date', 'granularity': 'day'}"
+    )
+    expected = "cannot batch on a `date` event column"
+
+
 class TestMicrobatchWithoutUniqueKey(_MicrobatchConfigCase):
     """The showcase model in this repository claims microbatch requires ``unique_key``; the
     write path is a partition overwrite, so measure whether anything actually enforces it."""
