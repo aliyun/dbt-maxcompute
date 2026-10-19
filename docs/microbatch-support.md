@@ -167,6 +167,16 @@ decision to make deliberately rather than as part of a bug fix.
 If the profile's `timezone` cannot be resolved on the host running dbt, the window is left as
 dbt-core rendered it and a warning is logged: a guessed shift is worse than the known behaviour.
 
+A `set odps.sql.timezone=...;` written inside a model does **not** move the clock the window is
+stated on, so it cannot be used to work around a wrong `timezone`. The adapter turns leading `set`
+statements into per-statement hints, and measured on a real project in both directions - profile on
+UTC with a statement asking for `Asia/Shanghai`, and the reverse - the value pyodps submits from the
+profile wins: the session parses timestamp strings with it, and `session_boundary_text` shifts the
+window with the same value. The two therefore cannot drift apart. What a statement-level override
+loses is its own effect on timestamp parsing, which is a separate question from this strategy. (A
+statement-level value does apply when nothing is pinned globally; this adapter always pins the
+profile's value, including `Etc/GMT` for an unset `timezone`.)
+
 ### The one thing a wall clock cannot state: the fold hour
 
 Stating a boundary as the session's wall clock is only unambiguous while that clock maps one-to-one
