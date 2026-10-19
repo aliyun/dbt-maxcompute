@@ -155,14 +155,17 @@ properties of that rendering are deliberate:
 | `partition_by.data_type` | window vs partition with a non-UTC `timezone` |
 | --- | --- |
 | `timestamp`, `datetime` | aligned - the shift is derived from the session clock |
-| `timestamp_ntz` | **not aligned** - a naive column has no clock, so shifting its boundary by the session offset moves rows between partitions |
+| `timestamp_ntz` | **worse, not merely unaligned** - a naive column has no clock, so shifting its boundary moves rows that today land inside their own batch into the neighbouring batch's window. Measured end to end (day batches, `timezone: Asia/Shanghai`, four rows at 01:00 and 23:00 UTC on two days): the first window writes *two* partitions, the second window's `insert overwrite` then erases the row the first one wrote, and replaying the first window erases one of the second's. The same model on `master`, where the window is not shifted, loses nothing - its batches simply follow the naive local day (measured 2026-10-20) |
 | `date` | unusable either way - comparing a `DATE` with a timestamp string yields `NULL`, so no row falls in any window (measured) |
 
 `dbt` hands the rendering point a field name, not a column type, so these three cannot be told
 apart where the boundary is written. Until they can, a `microbatch` model partitioned on
-`timestamp_ntz` or `date` should keep `timezone` unset. Refusing the combination at compile time is
-the other way to close this, and it would stop jobs that behave correctly today, so that is a
-decision to make deliberately rather than as part of a bug fix.
+`timestamp_ntz` or `date` should keep `timezone` unset - and the measurement above is the reason
+that advice is not cosmetic: for `timestamp_ntz` on a non-UTC session the shift is not a no-op, it
+takes a combination that drops no rows today and gives it the very failure this pull request fixes.
+Refusing the combination at compile time is the other way to close this. It is not free either -
+stopping a pipeline that is self-consistent today is a product decision, so it belongs in a deliberate
+change rather than inside a bug fix.
 
 If the profile's `timezone` cannot be resolved on the host running dbt, the window is left as
 dbt-core rendered it and a warning is logged: a guessed shift is worse than the known behaviour.
@@ -219,7 +222,10 @@ Sydney, never the folded hour.
   boundaries over six (zone, day) pairs were read back through the server and round-tripped except
   the two fold instants described. Half-hour and 45-minute offsets, zones not measured here, and a
   fold landing exactly on a day-granularity boundary have not been checked.
-- `microbatch` models whose event time is `timestamp_ntz` or `date` under a non-UTC `timezone`, and
-  Python (MaxFrame) models on a non-UTC session - see the table above for why the first two are not
-  aligned by this, and note that the MaxFrame path filters the returned DataFrame in Python rather
-  than in SQL, so it does not go through this rendering at all.
+- `microbatch` models whose event time is a `date` column under a non-UTC `timezone`: the row-sifting
+  comparison itself is unmeasured there, since no row falls inside any window on any session
+  (`timestamp_ntz` under a non-UTC session is no longer in this list - it was measured end to end on
+  2026-10-20, and the outcome is in the table above: the shift drops rows it does not drop on
+  `master`). Also unmeasured: `timestamp_ntz` on a *negative*-offset session or with `batch_size: hour`,
+  and Python (MaxFrame) models on a non-UTC session - the MaxFrame path filters the returned DataFrame
+  in Python rather than in SQL, so it does not go through this rendering at all.
