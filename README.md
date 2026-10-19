@@ -71,7 +71,7 @@ For an existing preview environment affected by this problem, upgrade to the
 release that includes the dependency guard:
 
 ```bash
-python -m pip install --upgrade "dbt-maxcompute[maxframe]==1.11.3"
+python -m pip install --upgrade "dbt-maxcompute[maxframe]==1.11.4"
 ```
 
 ### Configure dbt profile:
@@ -439,7 +439,7 @@ Due to MaxCompute engine characteristics, the following limitations apply:
 | **No rowcount support** | MaxCompute does not return the number of affected rows after DML operations. The `rows_affected` field in adapter responses will not be available. |
 | **No transaction support** | MaxCompute does not support traditional database transactions. `BEGIN`, `COMMIT`, and `ROLLBACK` operations are no-ops. |
 | **No index DDL** | MaxCompute has no `CREATE INDEX`. dbt accepts an `indexes:` config but the adapter never applies it, so models that rely on it get no index and no warning. |
-| **Incremental full refresh is not atomic** | `dbt run --full-refresh` on an incremental SQL model drops the existing table and rebuilds it in place, instead of building a scratch relation and renaming. A build that fails midway leaves the previous version gone. The opt-in `truncate_insert` strategy rejects this rebuild; configure `full_refresh=false` to keep its target. |
+| **Incremental full refresh is not atomic** | `dbt run --full-refresh` on an incremental SQL model, including `truncate_insert`, drops the existing table and rebuilds it in place, instead of building a scratch relation and renaming. A build that fails midway leaves the previous version gone. Configure `full_refresh=false` to keep a `truncate_insert` target even during `--full-refresh`. |
 | **Declared-width columns are widened before an incremental write** | MaxCompute truncates an over-long value on insert without failing the job, so dbt-core's column-widening pass has to run *before* the merge, and it now does: `adapter.expand_target_column_types` submits `alter table ... change column` and the target keeps the incoming value. Two kinds of column are left alone because MaxCompute refuses to re-type them at all -- primary key and partition columns -- and a column that keeps a declared width against an unbounded `string` source; both are reported in the run log instead of losing characters quietly. Set `expand_column_types` on a model to choose: `bounded` (default) never drops a declared width, `widen` also turns such a column into unbounded `string` so no value can be lost, `off` restores the previous behaviour of never touching the target schema. Widening cannot be undone: MaxCompute rejects `string -> varchar(n)`. |
 | **Snapshots need a transactional, keyless target** | Expiring a snapshot version is a `MERGE INTO`, which MaxCompute runs only on transactional tables, and a key's expired version must coexist with its current version. A pre-existing plain table or a primary-key (PK Delta) table is rejected before the merge; see [Snapshot support](docs/snapshot-support.md). |
 

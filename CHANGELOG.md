@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.4] — 2026-10-19
+
+### Changed
+
+- `truncate_insert` now supports full-refresh through the existing incremental
+  rebuild path, allowing schema changes that require recreating the target.
+  Normal runs and models configured with `full_refresh=false` still preserve
+  the table object. Full-refresh replaces the object and does not guarantee
+  preservation of its Label grants.
+
 ## [1.11.3] — 2026-10-15
 
 ### Added

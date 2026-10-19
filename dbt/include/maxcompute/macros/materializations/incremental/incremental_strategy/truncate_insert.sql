@@ -29,13 +29,6 @@
                 "it will not replace a view or external relation."
             ) %}
         {% endif %}
-        {% if full_refresh_mode %}
-            {% do exceptions.raise_compiler_error(
-                "The 'truncate_insert' strategy preserves the existing target table "
-                "and does not support rebuilding it with full-refresh. Set "
-                "full_refresh=false on this model to keep the table during --full-refresh."
-            ) %}
-        {% endif %}
         {% set table = adapter.get_odps_table_by_relation(existing_relation) %}
         {% if table is none %}
             {% do exceptions.raise_compiler_error(

@@ -7,7 +7,7 @@ MODEL = """
 {{ config(
     materialized='incremental',
     incremental_strategy='truncate_insert',
-    full_refresh=var('allow_rebuild', false),
+    full_refresh=var('allow_rebuild', none),
     on_schema_change=var('schema_change', 'ignore')
 ) }}
 {% set mode = var('mode', 'initial') %}
@@ -17,6 +17,8 @@ select unknown_column from {{ this }}
 select 'replacement' as value, cast(3 as bigint) as id
 {% elif mode == 'empty' %}
 select cast(null as bigint) as id, cast(null as string) as value where false
+{% elif mode == 'schema_changed' %}
+select cast(3 as string) as id, cast(42 as bigint) as value, 'replacement' as extra_value
 {% else %}
 select cast(1 as bigint) as id, 'original' as value
 union all select cast(2 as bigint), 'old'
@@ -78,16 +80,44 @@ class TestTruncateInsert:
         assert self._rows(project) == before
         self._assert_no_temp(project)
 
-    def test_full_refresh_false_keeps_table_and_new_strategy_rejects_rebuild(self, project):
+    def test_full_refresh_false_keeps_table(self, project):
         run_dbt(["run"])
         before = self._table(project).creation_time
-        run_dbt(["run", "--full-refresh", "--vars", "{mode: reordered}"])
+        run_dbt(["run", "--full-refresh", "--vars", "{mode: reordered, allow_rebuild: false}"])
         assert self._rows(project) == [(3, "replacement")]
         assert self._table(project).creation_time == before
+        self._assert_no_temp(project)
 
-        result = run_dbt(
-            ["run", "--full-refresh", "--vars", "{allow_rebuild: true}"], expect_pass=False
+    @pytest.mark.parametrize(
+        "refresh_args,refresh_vars",
+        [
+            (["--full-refresh"], "{mode: schema_changed, schema_change: fail}"),
+            ([], "{mode: schema_changed, schema_change: fail, allow_rebuild: true}"),
+        ],
+    )
+    def test_full_refresh_rebuilds_changed_schema(self, project, refresh_args, refresh_vars):
+        run_dbt(["run", "--full-refresh"])
+        project.run_sql("alter table {schema}.whole_table set comment 'old target metadata'")
+
+        run_dbt(["run", *refresh_args, "--vars", refresh_vars])
+        table = self._table(project)
+        assert [
+            (column.name, str(column.type).lower()) for column in table.table_schema.simple_columns
+        ] == [
+            ("id", "string"),
+            ("value", "bigint"),
+            ("extra_value", "string"),
+        ]
+        assert self._rows(project) == [("3", 42)]
+        assert list(
+            project.run_sql("select extra_value from {schema}.whole_table", fetch="all")[0]
+        ) == ["replacement"]
+        assert table.comment != "old target metadata"
+        self._assert_no_temp(project)
+
+        # The rebuilt schema can be used by the next ordinary overwrite.
+        run_dbt(
+            ["run", "--vars", "{mode: schema_changed, schema_change: fail, allow_rebuild: false}"]
         )
-        assert "full_refresh=false" in result[0].message
-        assert self._rows(project) == [(3, "replacement")]
-        assert self._table(project).creation_time == before
+        assert self._rows(project) == [("3", 42)]
+        self._assert_no_temp(project)

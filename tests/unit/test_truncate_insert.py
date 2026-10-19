@@ -54,7 +54,7 @@ def _load(path, context, materialization=False):
         context[name] = MacroGenerator(node, context)
 
 
-def _context(values=None, existing=TARGET, full_refresh=False, partitioned=False):
+def _context(values=None, existing=TARGET, full_refresh=False, partitioned=False, language="sql"):
     values = dict(values or {})
     events = []
     columns = [SimpleNamespace(name="id"), SimpleNamespace(name="value")]
@@ -67,6 +67,10 @@ def _context(values=None, existing=TARGET, full_refresh=False, partitioned=False
         get_columns_in_relation=lambda relation: columns,
         quote=MaxComputeAdapter.quote,
         drop_relation=lambda relation: events.append(("drop", relation.identifier)) or "",
+        rename_relation=lambda source, target: events.append(
+            ("rename", source.identifier, target.identifier)
+        )
+        or "",
     )
     context = {
         "return": _return,
@@ -87,7 +91,7 @@ def _context(values=None, existing=TARGET, full_refresh=False, partitioned=False
         return existing if relation.identifier == TARGET.identifier else None
 
     context.update(
-        model={"language": "sql"},
+        model={"language": language},
         this=TARGET,
         sql="select 2 as id, 'new' as value",
         compiled_code="select 2 as id, 'new' as value",
@@ -101,7 +105,9 @@ def _context(values=None, existing=TARGET, full_refresh=False, partitioned=False
         make_backup_relation=lambda relation, kind: relation.incorporate(
             path={"identifier": relation.identifier + "__dbt_bak"}
         ),
-        should_full_refresh=lambda: full_refresh and values.get("full_refresh") is not False,
+        should_full_refresh=lambda: (
+            full_refresh if values.get("full_refresh") is None else values["full_refresh"]
+        ),
         incremental_validate_on_schema_change=lambda value, default: value or default,
         merge_sql_hints_and_header=lambda hints, header: header,
         pre_hooks=[],
@@ -121,6 +127,14 @@ def _context(values=None, existing=TARGET, full_refresh=False, partitioned=False
         mc_validate_microbatch_config=lambda *args: None,
         log=lambda message: "",
     )
+    if language == "python":
+        context.update(
+            invocation_id="abcdef123456",
+            load_relation=lambda relation: None,
+            maxframe_write_table=lambda *args, **kwargs: "python job",
+            maxframe_select_without_sentinel=lambda relation: "select id, value from stage",
+            process_schema_changes=lambda *args: None,
+        )
     _load(INCREMENTAL, context, materialization=True)
     adapter.get_incremental_strategy_macro = lambda ctx, strategy: (
         context["get_incremental_truncate_insert_sql"]
@@ -173,15 +187,7 @@ def test_first_run_creates_target():
 
 
 def test_python_staging_uses_same_overwrite_and_cleans_its_relations():
-    context, events = _context({"incremental_strategy": "truncate_insert"})
-    context.update(
-        model={"language": "python"},
-        invocation_id="abcdef123456",
-        load_relation=lambda relation: None,
-        maxframe_write_table=lambda *args, **kwargs: "python job",
-        maxframe_select_without_sentinel=lambda relation: "select id, value from stage",
-        process_schema_changes=lambda *args: None,
-    )
+    context, events = _context({"incremental_strategy": "truncate_insert"}, language="python")
     _run(context)
     statements = [event for event in events if event[0] == "statement"]
     assert [event[1] for event in statements] == [
@@ -204,14 +210,16 @@ def test_python_staging_uses_same_overwrite_and_cleans_its_relations():
         ({"partitions": ["2026-01-01"]}, {}, "non-partitioned"),
         ({"predicates": ["id > 1"]}, {}, "entire table"),
         ({"incremental_predicates": ["id > 1"]}, {}, "entire table"),
-        ({}, {"full_refresh": True}, "full_refresh=false"),
         ({}, {"partitioned": True}, "target is partitioned"),
         ({}, {"existing": TARGET.incorporate(type="view")}, "existing table"),
         ({}, {"existing": TARGET.incorporate(type="external")}, "existing table"),
     ],
 )
-def test_invalid_new_strategy_fails_before_hooks_or_writes(values, kwargs, message):
-    context, events = _context({"incremental_strategy": "truncate_insert", **values}, **kwargs)
+@pytest.mark.parametrize("full_refresh", [False, True])
+def test_invalid_new_strategy_fails_before_hooks_or_writes(values, kwargs, message, full_refresh):
+    context, events = _context(
+        {"incremental_strategy": "truncate_insert", **values}, full_refresh=full_refresh, **kwargs
+    )
     with pytest.raises(CompilationError, match=message):
         _run(context)
     assert events == []
@@ -225,13 +233,70 @@ def test_unreadable_target_metadata_does_not_allow_an_unchecked_overwrite():
     assert events == []
 
 
-def test_full_refresh_false_keeps_new_strategy_on_the_overwrite_path():
+@pytest.mark.parametrize("language", ["sql", "python"])
+@pytest.mark.parametrize("full_refresh", [False, True])
+def test_full_refresh_false_keeps_new_strategy_on_the_overwrite_path(language, full_refresh):
     context, events = _context(
-        {"incremental_strategy": "truncate_insert", "full_refresh": False}, full_refresh=True
+        {"incremental_strategy": "truncate_insert", "full_refresh": False},
+        full_refresh=full_refresh,
+        language=language,
     )
     _run(context)
     assert not any(event[:2] == ("drop", "target") for event in events)
+    assert not any(event[0] == "rename" for event in events)
     assert any("insert overwrite" in event[-1] for event in events if event[0] == "statement")
+
+
+@pytest.mark.parametrize(
+    "values,full_refresh",
+    [({}, True), ({"full_refresh": None}, True), ({"full_refresh": True}, False)],
+)
+def test_full_refresh_rebuilds_sql_target_from_new_schema(values, full_refresh):
+    context, events = _context(
+        {"incremental_strategy": "truncate_insert", "on_schema_change": "fail", **values},
+        full_refresh=full_refresh,
+    )
+    new_sql = "select cast(3 as string) as id, 42 as replacement"
+    context["sql"] = new_sql
+    context["process_schema_changes"] = lambda *args: pytest.fail(
+        "full-refresh must rebuild without reconciling the old schema"
+    )
+    context["adapter"].get_incremental_strategy_macro = lambda *args: pytest.fail(
+        "full-refresh must use the shared rebuild path"
+    )
+    _run(context)
+    statements = [event for event in events if event[0] == "statement"]
+    assert statements == [("statement", "main", f"create table {TARGET} as {new_sql}")]
+    assert events.index(("drop", "target")) < events.index(statements[0])
+    assert not any(event[0] == "rename" for event in events)
+
+
+@pytest.mark.parametrize(
+    "values,full_refresh",
+    [({}, True), ({"full_refresh": None}, True), ({"full_refresh": True}, False)],
+)
+def test_full_refresh_rebuilds_python_target_through_intermediate(values, full_refresh):
+    context, events = _context(
+        {"incremental_strategy": "truncate_insert", **values},
+        full_refresh=full_refresh,
+        language="python",
+    )
+    context["adapter"].get_incremental_strategy_macro = lambda *args: pytest.fail(
+        "full-refresh must use the shared rebuild path"
+    )
+    _run(context)
+    statements = [event for event in events if event[0] == "statement"]
+    assert [event[1] for event in statements] == ["main", "create_maxframe_relation"]
+    assert "target__dbt_int" in statements[-1][2]
+    renames = [event for event in events if event[0] == "rename"]
+    assert renames == [
+        ("rename", "target", "target__dbt_bak"),
+        ("rename", "target__dbt_int", "target"),
+    ]
+    assert events.index(statements[-1]) < events.index(renames[0])
+    assert events.index(renames[-1]) < events.index(("drop", "target__dbt_bak"))
+    assert ("drop", "target") not in events
+    assert not any("insert overwrite" in event[-1] for event in statements)
 
 
 @pytest.mark.parametrize("strategy", LEGACY)
