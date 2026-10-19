@@ -158,14 +158,19 @@ properties of that rendering are deliberate:
 | `timestamp_ntz` | **worse, not merely unaligned** - a naive column has no clock, so shifting its boundary moves rows that today land inside their own batch into the neighbouring batch's window. Measured end to end (day batches, `timezone: Asia/Shanghai`, four rows at 01:00 and 23:00 UTC on two days): the first window writes *two* partitions, the second window's `insert overwrite` then erases the row the first one wrote, and replaying the first window erases one of the second's. The same model on `master`, where the window is not shifted, loses nothing - its batches simply follow the naive local day (measured 2026-10-20) |
 | `date` | unusable either way - comparing a `DATE` with a timestamp string yields `NULL`, so no row falls in any window (measured) |
 
-`dbt` hands the rendering point a field name, not a column type, so these three cannot be told
-apart where the boundary is written. Until they can, a `microbatch` model partitioned on
-`timestamp_ntz` or `date` should keep `timezone` unset - and the measurement above is the reason
-that advice is not cosmetic: for `timestamp_ntz` on a non-UTC session the shift is not a no-op, it
-takes a combination that drops no rows today and gives it the very failure this pull request fixes.
-Refusing the combination at compile time is the other way to close this. It is not free either -
-stopping a pipeline that is self-consistent today is a product decision, so it belongs in a deliberate
-change rather than inside a bug fix.
+The window is rendered from an event-time filter that carries a field name and two instants - no
+column type - and the relation it is rendered on is not given one either, which is why these three
+cases are indistinguishable today where the boundary is written. That is this adapter's construction,
+not a limit dbt imposes: the model's own declared `partition_by` - already the thing that decides
+whether a table is auto-partitioned at all - does reach the point where the relation is built. So
+narrowing the shift to the types it helps, or refusing the combination outright, are both implementable
+here; both also hinge on a declaration rather than on the column's physical type, and a declaration
+that disagrees with the data is a case not measured here. Either way that is a product decision about
+which contract to keep, so this pull request documents the behaviour instead of making it. Until one
+of them lands, a `microbatch` model partitioned on `timestamp_ntz` or `date` should keep `timezone`
+unset - the measurement above is why that advice is not cosmetic: for `timestamp_ntz` on a non-UTC
+session the shift is not a no-op, it takes a combination that drops no rows today and gives it the
+very failure this pull request fixes.
 
 If the profile's `timezone` cannot be resolved on the host running dbt, the window is left as
 dbt-core rendered it and a warning is logged: a guessed shift is worse than the known behaviour.
