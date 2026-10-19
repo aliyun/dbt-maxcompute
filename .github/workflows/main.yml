@@ -160,3 +160,43 @@ jobs:
       - name: Check ${{ matrix.dist-type }} distributions
         run: |
           python -c "import dbt.adapters.maxcompute"
+
+  test-maxframe-build:
+    name: verify MaxFrame extra / python 3.11
+    if: needs.build.outputs.is_alpha == 0
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install wheel with MaxFrame extra
+        run: |
+          python -m pip install --upgrade pip
+          wheel_path=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          python -m pip install "${wheel_path}[maxframe]" "dbt-core==1.11.2"
+          python -m pip check
+
+      - name: Check imports and seed Arrow writer
+        run: |
+          python - <<'PY'
+          from importlib.metadata import version
+          from odps.models import TableSchema
+          from odps.tunnel.io.writer import BaseArrowWriter
+
+          BaseArrowWriter(TableSchema.from_lists(["id", "name"], ["bigint", "string"]))
+          import dbt.adapters.maxcompute
+          import maxframe
+          import pyarrow
+
+          for package in ("dbt-maxcompute", "maxframe", "numpy", "pandas", "pyarrow"):
+              print(f"{package} {version(package)}")
+          PY

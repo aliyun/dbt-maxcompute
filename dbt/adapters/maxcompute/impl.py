@@ -802,6 +802,7 @@ class MaxComputeAdapter(SQLAdapter):
             "delete+insert",
             "insert_overwrite",
             "microbatch",
+            "truncate_insert",
         ]
 
     def calculate_freshness_from_metadata(

@@ -1,7 +1,7 @@
 # Python UDFs
 
-> **Status: Beta (`1.11.3b3`).** Suitable for evaluation and controlled
-> workloads. Runtime dependency conventions may change before GA.
+> **Status: Generally Available (`1.11.3`).** Supported for production workloads
+> within the scope and limitations documented below.
 
 `dbt-maxcompute` can build persistent MaxCompute Python functions from dbt
 `functions:` resources. Python scalar UDFs and Python aggregate UDFs (UDAFs)
@@ -28,6 +28,12 @@ MaxCompute clients.
 The adapter enables MaxCompute CPython 3.11 by default with
 `odps.sql.python.version=cp311` for SQL submitted through dbt. CPython 3.7.3
 remains available as an explicit legacy compatibility mode.
+
+This global CP311 default is unchanged from the `1.11.3` beta releases,
+including calls by raw SQL function name. When upgrading from `1.11.2`, set
+`sql_hints={'odps.sql.python.version': 'cp27'}` for existing Python 2.7 UDFs,
+or use `cp37` for Python 3.7 UDFs. A legacy UDF called by a hook also needs
+the corresponding `SET odps.sql.python.version=...;` in that hook's SQL.
 
 dbt Core requires every Python function to have an effective
 `runtime_version`. Set CPython 3.11 once as the project-wide default in
@@ -286,6 +292,9 @@ does not carry the expected dbt ownership marker.
 - A single MaxCompute SQL statement cannot mix incompatible Python runtimes.
   The adapter defaults to `cp311`; a legacy `cp37` call must explicitly
   override `odps.sql.python.version` in `sql_hints` for that execution path.
+- `dbt show --select` uses dbt Core's preview SQL path, which does not apply
+  model `sql_hints`. For a legacy runtime, also provide the matching `SET`
+  in the model's `sql_header` when previewing it.
 
 ## Troubleshooting
 

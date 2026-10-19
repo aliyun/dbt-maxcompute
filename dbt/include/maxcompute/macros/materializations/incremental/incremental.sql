@@ -40,6 +40,10 @@
   {%- set full_refresh_mode = (should_full_refresh() or existing_relation.is_view) -%}
   {%- set on_schema_change = incremental_validate_on_schema_change(config.get('on_schema_change'), default='ignore') -%}
 
+  {% if incremental_strategy == 'truncate_insert' and mc_truncate_insert_uses_builtin(context) %}
+    {% do mc_validate_truncate_insert_config(partition_by, partitions, incremental_predicates, existing_relation, full_refresh_mode) %}
+  {% endif %}
+
   {% if incremental_strategy == 'microbatch' %}
     {% do mc_validate_microbatch_config(partition_by, config.get('batch_size'), config.get('event_time')) %}
   {% endif %}

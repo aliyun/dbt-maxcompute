@@ -37,12 +37,12 @@ level than the adapter package:
 | Capability | Status | Intended use |
 |---|---|---|
 | SQL models and established materializations | Generally Available | Production |
-| MaxFrame Python models | **Production Preview** | Selected production workloads after reviewing documented limitations |
-| Python scalar and aggregate UDFs | **Beta** | Evaluation and controlled workloads; dependency conventions may change before GA |
+| MaxFrame Python models | Generally Available | Production within the documented supported scope |
+| Python scalar and aggregate UDFs | Generally Available | Production within the documented supported scope |
 
-Production Preview and Beta limitations are documented in their respective
-guides. Pre-release package versions such as `1.11.3b3` do not replace the
-latest stable release.
+MaxFrame Python models and Python scalar/aggregate UDFs are Generally Available
+starting with `1.11.3`. Their guides retain the supported scope and known
+limitations, including remote MaxFrame DAG cancellation.
 
 ## Getting Started
 
@@ -61,6 +61,17 @@ To run Python models on MaxFrame, install the optional MaxFrame runtime:
 
 ```bash
 pip install "dbt-maxcompute[maxframe]"
+```
+
+MaxFrame 2.x requires NumPy 1.x, so this extra selects PyArrow below 26. PyArrow 26
+requires NumPy 2 at import time; installing it alongside MaxFrame can make `dbt seed`
+report that PyArrow is missing even though it is installed.
+
+For an existing preview environment affected by this problem, upgrade to the
+release that includes the dependency guard:
+
+```bash
+python -m pip install --upgrade "dbt-maxcompute[maxframe]==1.11.4"
 ```
 
 ### Configure dbt profile:
@@ -153,6 +164,7 @@ odps.sql.decimal.odps2: "true"
 odps.sql.allow.fullscan: "true"
 odps.sql.select.output.format: "csv"
 odps.sql.submit.mode: "script"
+odps.sql.python.version: "cp311"
 odps.sql.allow.cartesian: "true"
 odps.sql.allow.schema.evolution: "true"
 odps.table.append2.enable": "true"
@@ -313,7 +325,9 @@ partition_by={
 ```
 
 Supported incremental strategies are `merge`, `append`, `delete+insert`,
-`insert_overwrite`, and `microbatch`. Incremental targets are created as
+`insert_overwrite`, `microbatch`, and the opt-in `truncate_insert` for
+[whole-table replacement on non-partitioned targets](docs/truncate-insert.md).
+Incremental targets are created as
 transactional MaxCompute tables because MaxCompute `MERGE` requires that
 property. Python microbatch models apply dbt's half-open event-time window to
 the returned DataFrame before writing each batch. For what a `microbatch` batch
@@ -425,7 +439,7 @@ Due to MaxCompute engine characteristics, the following limitations apply:
 | **No rowcount support** | MaxCompute does not return the number of affected rows after DML operations. The `rows_affected` field in adapter responses will not be available. |
 | **No transaction support** | MaxCompute does not support traditional database transactions. `BEGIN`, `COMMIT`, and `ROLLBACK` operations are no-ops. |
 | **No index DDL** | MaxCompute has no `CREATE INDEX`. dbt accepts an `indexes:` config but the adapter never applies it, so models that rely on it get no index and no warning. |
-| **Incremental full refresh is not atomic** | `dbt run --full-refresh` on an incremental SQL model drops the existing table and rebuilds it in place, instead of building a scratch relation and renaming. A build that fails midway leaves the previous version gone. |
+| **Incremental full refresh is not atomic** | `dbt run --full-refresh` on an incremental SQL model, including `truncate_insert`, drops the existing table and rebuilds it in place, instead of building a scratch relation and renaming. A build that fails midway leaves the previous version gone. Configure `full_refresh=false` to keep a `truncate_insert` target even during `--full-refresh`. |
 | **Declared-width columns are widened before an incremental write** | MaxCompute truncates an over-long value on insert without failing the job, so dbt-core's column-widening pass has to run *before* the merge, and it now does: `adapter.expand_target_column_types` submits `alter table ... change column` and the target keeps the incoming value. Two kinds of column are left alone because MaxCompute refuses to re-type them at all -- primary key and partition columns -- and a column that keeps a declared width against an unbounded `string` source; both are reported in the run log instead of losing characters quietly. Set `expand_column_types` on a model to choose: `bounded` (default) never drops a declared width, `widen` also turns such a column into unbounded `string` so no value can be lost, `off` restores the previous behaviour of never touching the target schema. Widening cannot be undone: MaxCompute rejects `string -> varchar(n)`. |
 | **Snapshots need a transactional, keyless target** | Expiring a snapshot version is a `MERGE INTO`, which MaxCompute runs only on transactional tables, and a key's expired version must coexist with its current version. A pre-existing plain table or a primary-key (PK Delta) table is rejected before the merge; see [Snapshot support](docs/snapshot-support.md). |
 
