@@ -59,7 +59,8 @@ setup(
         "dbt-core>=1.11.2",
     ],
     extras_require={
-        "maxframe": ["maxframe>=2.7.1,<3.0.0"],
+        # MaxFrame 2.x requires NumPy 1.x; PyArrow 26 requires NumPy 2 at import time.
+        "maxframe": ["maxframe>=2.7.1,<3.0.0", "pyarrow>=1.0.0,<26.0.0"],
     },
     zip_safe=False,
     classifiers=[

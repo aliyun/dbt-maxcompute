@@ -41,8 +41,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   round-trips, column ordering, and materialized-view comment stability
   (a `table_comment` with quotes used to make every run look like a
   configuration change, so the view was dropped and re-created).
+
+## [1.11.4] — 2026-10-19
+
+### Changed
+
+- `truncate_insert` now supports full-refresh through the existing incremental
+  rebuild path, allowing schema changes that require recreating the target.
+  Normal runs and models configured with `full_refresh=false` still preserve
+  the table object. Full-refresh replaces the object and does not guarantee
+  preservation of its Label grants.
+
+## [1.11.3] — 2026-10-15
+
 ### Added
 
+- MaxFrame Python table/incremental models and Python scalar/aggregate UDFs
+  graduate to Generally Available within their documented supported scope.
+  Existing limitations, including remote MaxFrame DAG cancellation, remain.
+- Opt-in `truncate_insert` incremental strategy replaces all rows in a
+  non-partitioned target with one `INSERT OVERWRITE`, preserving the target
+  table object. Existing strategies and their full-refresh behavior are unchanged.
+  Existing project/package macro overrides keep their own validation and behavior.
 - SQL integration regression entry point: `scripts/run-integration-tests.sh`
   runs a minimal real-SQL set (table, view, incremental, dbt tests, persisted
   docs) plus an invalid-SQL case that must fail, and verifies that every test
@@ -54,12 +74,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/integration-tests.md` covers local and CI runs, including the
   three-tier (schema-enabled) project requirement and `auth_type: chain` for
   keeping access keys out of files.
+- New `catalog_strict_metadata` profile option (default `false`). When enabled,
+  `dbt docs generate` fails if a relation listed for the catalog stays unreadable
+  after the metadata retries; dbt-core records the failure in `catalog.json`
+  `errors`, making the gap visible to consumers of the artifact.
+
+### Upgrade notes
+
+- SQL continues to default `odps.sql.python.version` to `cp311`, as in the
+  `1.11.3` beta releases. Upgrading from a beta preserves the runtime default
+  for both dbt function references and functions called by raw SQL name.
+- When upgrading from `1.11.2`, which did not set this hint globally, models
+  calling legacy CPython 2.7 or 3.7 UDFs must explicitly set
+  `sql_hints={'odps.sql.python.version': 'cp27'}` or `cp37`, respectively.
+  Hooks that invoke a legacy UDF must include the corresponding `SET` in
+  their own SQL statement. A single statement cannot mix Python runtimes.
 
 ### Fixed
 
+- Incremental materializations now execute hooks configured with
+  `transaction: false`, rather than silently skipping them.
+- Incremental column widening preserves MaxCompute column type details and
+  validates the widening plan before changing the target schema.
+- Snapshots validate that an existing target can retain history before
+  submitting a merge, and preserve the snapshot key columns.
+- The optional `[maxframe]` installation now constrains PyArrow below 26 to match
+  MaxFrame 2.x's NumPy 1 requirement. PyArrow 26 could install successfully but fail
+  to import, causing `dbt seed` to report that PyArrow was missing. CI now checks
+  the built wheel with the extra installed and initializes the PyODPS Arrow writer.
 - Functional tests without credentials are now reported as *skipped* with the
   reason, instead of failing with a missing-file error inside the profile
   fixture.
+- `dbt docs generate` no longer drops unreadable relations from `catalog.json`
+  without naming them. Each skipped relation is now listed in a single warning
+  that explains the gap and how to opt into strict mode.
+- `get_odps_table_by_relation` retries now also cover `NoSuchObject` raised by the
+  metadata lookup itself, not only by reloading the returned object.
+
+
+- Microbatch models whose event-time column is a `datetime` can now run on the
+  adapter's default profile. dbt-core renders the batch window from a UTC
+  `datetime`, so the text carries an offset (`event_time >= '2025-05-01
+  00:00:00+00:00'`); MaxCompute compares that against `timestamp` columns but
+  refuses it for `datetime` ones, whose string form is `yyyy-mm-dd hh:mi:ss`
+  exactly, so every batch failed while the physical plan was generated. The
+  boundary is now stated without the offset suffix - and only where the session
+  clock reads UTC, so the window denotes the same instant. Sessions pinned to
+  another zone are untouched, and microseconds are kept rather than rounded:
+  a `datetime` column rejects fractional seconds too, so a `--sample` window
+  against one still fails to compile instead of silently changing the window.
+  See `docs/microbatch-support.md`.
 
 ## [1.11.3b3] — 2026-08-26
 

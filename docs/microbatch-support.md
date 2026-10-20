@@ -13,6 +13,7 @@ The regressions that hold these statements in place live in
 | `test_incremental.py::TestMicrobatchMaxCompute` | upstream's microbatch contract, on this warehouse |
 | `test_microbatch_window_semantics.py` | windows, replay, empty window, late data, duplicate keys, rejected configurations |
 | `test_microbatch_partition_timezone.py` | the session-timezone dependency described below |
+| `test_microbatch_datetime_event_column.py` | the shape of a batch boundary, and which event-column types can be compared against it |
 | `test_microbatch_failure_retry.py` | what survives a batch that fails, and what `dbt retry` replays |
 
 ## How a batch is written
@@ -45,6 +46,56 @@ dbt run --event-time-start 2025-05-02 --event-time-end 2025-05-03
 ```
 
 The two flags are mutually required, and they are what makes these runs reproducible.
+
+## The event column's type decides whether the window text parses at all
+
+dbt-core computes every batch window in UTC and renders it from a `datetime`, so the text it
+produces carries an offset: `event_time >= '2025-05-01 00:00:00+00:00'`. MaxCompute compares that
+shape against `timestamp` and `timestamp_ntz` columns, but a `datetime` column accepts
+`yyyy-mm-dd hh:mi:ss` and nothing else - the offset makes the batch fail while the physical plan is
+being generated, before any row is read:
+
+```
+ODPS-0130071:[0,0] Semantic analysis exception - physical plan generation failed:
+ODPS-0121095:Invalid argument - in function cast, string datetime's format must be
+yyyy-mm-dd hh:mi:ss, input string is:2025-05-01 00:00:00+00:00
+```
+
+So on the adapter's default profile - no `timezone` in the profile, so the session runs on UTC - a
+microbatch model whose event column is `datetime` could not run at all, while the same model on
+`timestamp` ran. The adapter now states the window **without the offset suffix** whenever the
+session clock is UTC, which leaves the instant the window means unchanged. Measured on a real
+project, three column types x three boundary texts, each repeated on three session clocks
+(`Etc/GMT`, `Asia/Shanghai`, `Etc/GMT+8`). The table states whether a text **parses** - which rows a
+session picks with a text that parses depends on its clock, and that is the next section's subject:
+
+| Event column | `'2025-05-01 09:00:00'` | `'2025-05-01 09:00:00+00:00'` | `'2025-05-01 09:00:00.500000'` |
+| --- | --- | --- | --- |
+| `datetime` | parses; selects its rows on a UTC session | refused (`ODPS-0121095`) | refused (`ODPS-0121095`) |
+| `timestamp` | parses | parses | parses |
+| `timestamp_ntz` | parses | parses | parses |
+
+Removing the suffix moves no window: on a given session clock, the same rows were selected with
+and without the `+00:00` suffix for both `timestamp` and `timestamp_ntz` (measured 2026-10-07 at
+18:43 on a real project, three session clocks x both texts). Only the session clock decides which
+rows a text selects - the subject of the next section - and `datetime` is the one type that parses
+only the suffix-free form.
+
+`date` does not appear above because no text in it compares: a `date` event column yields NULL
+against all three, so every batch selects nothing while the run still reports success. That is a
+different defect from this one, and pull request #39 proposes refusing it at compile time.
+
+Two edges are kept visible rather than smoothed over:
+
+* **Fractional seconds are not rounded away.** `datetime` refuses them too (see the table), so a
+  window carrying one still fails to compile against such a column - in practice only `--sample`,
+  whose end is `datetime.now(UTC)`. Rounding would have traded that loud failure for a silently
+  different window on the two types that do accept fractions. Batch boundaries themselves never
+  carry a sub-second value: dbt-core aligns every boundary to `batch_size`, and the finest grain is
+  an hour.
+* **A profile that pins a non-UTC `timezone` is not changed here.** There the window has to be
+  shifted onto that clock as well, which is the subject of the next section; on such a session a
+  `datetime` column keeps failing outright, exactly as it does today.
 
 ## Requirements, and who enforces them
 
@@ -93,4 +144,6 @@ reporting an error the moment the behaviour changes and can be deleted deliberat
   to the compiled SQL;
 - `batch_size` of `month` or `year`, and how their units interact with `trunc_time()`;
 - `partitions`, `lookback`, `on_schema_change`, `grants` and model contracts on microbatch models;
+- `datetime` event columns on a profile that pins a non-UTC `timezone`: the window has to be
+  shifted onto that clock first, and the refusal above is what was measured today;
 - `dbt retry` for a model whose *first* batch fails.

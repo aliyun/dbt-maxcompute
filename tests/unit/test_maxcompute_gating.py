@@ -45,12 +45,9 @@ class TestBlockedReason:
         assert "DBT_PROFILE_PATH" in reason
         assert maxcompute_gating.DOC_URL in reason
 
-    def test_chain_without_exported_credentials_is_blocked(self, tmp_path, monkeypatch):
+    def test_chain_without_exported_keys_is_resolved_at_preflight(self, tmp_path, monkeypatch):
         write_profile(tmp_path, monkeypatch, PROFILE_BODY + "auth_type: chain\n")
-        reason = blocked_reason()
-        assert reason is not None
-        assert "chain" in reason
-        assert "ALIBABA_CLOUD_ACCESS_KEY_ID" in reason
+        assert blocked_reason() is None
 
     def test_access_key_profile_without_keys_is_blocked(self, tmp_path, monkeypatch):
         write_profile(tmp_path, monkeypatch, PROFILE_BODY)
@@ -210,3 +207,45 @@ class TestSchemaManifest:
         monkeypatch.setattr(maxcompute_gating, "existing_schemas", lambda: ["test_foreign"])
         assert maxcompute_gating.leftover_schemas() == []
         assert maxcompute_gating.recorded_schemas() == []
+
+
+@pytest.mark.parametrize(
+    "auth_config",
+    [
+        {
+            "auth_type": "sts",
+            "access_key_id": "test-id",
+            "access_key_secret": "test-secret",
+            "security_token": "test-token",
+        },
+        {
+            "auth_type": "oidc_role_arn",
+            "role_arn": "test-role",
+            "oidc_provider_arn": "test-provider",
+            "oidc_token_file_path": "/tmp/test-token",
+        },
+        {"auth_type": "ecs_ram_role", "role_name": "test-role"},
+        {"auth_type": "chain"},
+    ],
+)
+def test_preflight_uses_the_same_credentials_as_the_adapter(monkeypatch, auth_config):
+    from dbt.adapters.maxcompute.credentials import MaxComputeCredentials
+
+    captured = []
+    expected_client = object()
+
+    def adapter_client(credentials):
+        captured.append(credentials)
+        return expected_client
+
+    monkeypatch.setattr(MaxComputeCredentials, "odps", adapter_client)
+    profile = {
+        "type": "maxcompute",
+        "project": "p",
+        "schema": "s",
+        "endpoint": "https://example.invalid",
+        **auth_config,
+    }
+    assert maxcompute_gating.odps_client(profile) is expected_client
+    for key, value in auth_config.items():
+        assert getattr(captured[0], key) == value

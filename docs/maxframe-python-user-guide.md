@@ -1,15 +1,15 @@
 # MaxFrame Python user guide
 
-`dbt-maxcompute` 1.11.3b3 provides MaxFrame Python models as a
-**Production Preview** and MaxCompute catalog Python UDF/UDAF resources as a
-**Beta** capability.
+`dbt-maxcompute` 1.11.3 provides MaxFrame Python models and MaxCompute catalog
+Python UDF/UDAF resources as **Generally Available** capabilities within their
+documented supported scope.
 
 Use MaxFrame Python models when a transformation is easier to express with a
 DataFrame API than SQL—for example feature engineering, Python-based data
 cleaning, or reusable Python scoring logic—while keeping normal dbt
 dependencies, tests, partitions, and incremental materializations.
 
-## 1. Install the Production Preview
+## 1. Install the adapter
 
 Create a dedicated environment. Python 3.11 is the recommended baseline when
 your model serializes custom Python functions to MaxCompute workers.
@@ -18,13 +18,11 @@ your model serializes custom Python functions to MaxCompute workers.
 python3.11 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install "dbt-maxcompute[maxframe]==1.11.3b3"
+python -m pip install "dbt-maxcompute[maxframe]==1.11.3"
 python -m dbt --version
 ```
 
-Keep the exact version pin and do not add pip's global `--pre` flag. The exact
-pin selects this preview without globally opting its dependencies into
-prerelease resolution.
+Keep an exact version pin for reproducible production environments.
 
 The adapter does not restrict MaxFrame installation to Python 3.11. Other
 adapter-supported Python versions can run built-in MaxFrame DataFrame
@@ -280,7 +278,7 @@ from {{ ref('orders') }}
 
 Python aggregate UDFs are also supported. See
 [Python UDFs](python-udfs.md) for UDAF lifecycle methods, archive resources,
-safe updates, and current Beta limitations.
+safe updates, and current limitations.
 
 ## 8. Production rollout checklist
 
@@ -308,10 +306,8 @@ The complete release gates are documented in
   `packages`, Python views, snapshots, and ephemeral Python models are not
   supported.
 - dbt interruption is not yet guaranteed to cancel an active remote MaxFrame
-  DAG immediately. This is why the feature remains Production Preview rather
-  than Generally Available.
-- Catalog Python UDF/UDAF resources remain Beta and have their own documented
-  limitations.
+  DAG immediately. Account for this in operational procedures.
+- Catalog Python UDF/UDAF resources have their own documented limitations.
 
 For detailed configuration and migration notes, see
 [MaxFrame Python Models](maxframe-python-models.md). For a demanding reference

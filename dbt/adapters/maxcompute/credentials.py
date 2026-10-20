@@ -41,6 +41,11 @@ class MaxComputeCredentials(Credentials):
     maxframe_python_version_check: str = "warn"
     maxframe_pythonpack_production: bool = True
 
+    # docs generate catalog completeness: when true, relations that are listed but
+    # stay unreadable after the metadata retries fail the catalog instead of being
+    # skipped with a warning.
+    catalog_strict_metadata: bool = False
+
     # auth config: All configuration items supported by alibabacloud_credentials
     # It should be noted that in order to avoid ambiguity,
     # `type` becomes `auth_type`, `policy` becomes `auth_policy`, `host` becomes `auth_host`,

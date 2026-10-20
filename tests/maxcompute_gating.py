@@ -126,35 +126,29 @@ def blocked_reason() -> Optional[str]:
         return f"profile {path.name} is missing required key(s): {', '.join(missing)}"
 
     kind = auth_type(profile)
-    if kind == "chain":
-        if not environment_credentials_present():
-            return (
-                f"profile {path.name} uses auth_type=chain but no credentials are exported "
-                "(set ALIBABA_CLOUD_ACCESS_KEY_ID/ALIBABA_CLOUD_ACCESS_KEY_SECRET)"
-            )
-    elif not (profile.get("access_key_id") and profile.get("access_key_secret")):
+    # Dynamic providers can resolve from files, OIDC or instance metadata, not
+    # just an exported key pair. Let the preflight exercise the adapter's actual
+    # provider instead of declaring a usable profile blocked here.
+    if kind in ("access_key", "sts") and not (
+        profile.get("access_key_id") and profile.get("access_key_secret")
+    ):
         return (
             f"profile {path.name} uses auth_type={kind} but has no access_key_id/access_key_secret"
         )
+    if kind == "sts" and not profile.get("security_token"):
+        return f"profile {path.name} uses auth_type=sts but has no security_token"
     return None
 
 
 def odps_client(profile: Optional[Dict[str, Any]] = None):
     """A PyODPS client for the configured profile (no credential material returned)."""
-    from odps import ODPS
+    from dbt.adapters.maxcompute.credentials import MaxComputeCredentials
 
-    profile = profile if profile is not None else load_profile()
-    kwargs: Dict[str, Any] = {"project": profile["project"], "endpoint": profile["endpoint"]}
-    if profile.get("tunnel_endpoint"):
-        kwargs["tunnel_endpoint"] = profile["tunnel_endpoint"]
-    if auth_type(profile) == "chain":
-        from odps.accounts import CredentialProviderAccount
-
-        from alibabacloud_credentials.client import Client as CredentialClient
-
-        kwargs["account"] = CredentialProviderAccount(CredentialClient())
-        return ODPS(**kwargs)
-    return ODPS(profile["access_key_id"], profile["access_key_secret"], **kwargs)
+    profile = dict(profile if profile is not None else load_profile())
+    # Use the same credential provider and options as the SQL tests. Rebuilding
+    # an ODPS client from only the AK pair drops STS tokens and role/OIDC config.
+    profile.setdefault("schema", "default")
+    return MaxComputeCredentials.from_dict(profile).odps()
 
 
 def manifest_path() -> Optional[Path]:

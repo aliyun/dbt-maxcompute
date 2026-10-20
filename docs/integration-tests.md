@@ -57,7 +57,7 @@ The script resolves a profile in this order:
    the environment and are never copied into a file in the repository:
 
    ```bash
-   export ALIBABA_CLOUD_ACCESS_KEY_ID=...      # or ODPS_ACCESS_ID / ODPS_ACCESS_KEY
+   export ALIBABA_CLOUD_ACCESS_KEY_ID=...
    export ALIBABA_CLOUD_ACCESS_KEY_SECRET=...
    export MC_PROJECT=your_three_tier_project
    export MC_ENDPOINT=http://service.cn-hangzhou.maxcompute.aliyun.com/api

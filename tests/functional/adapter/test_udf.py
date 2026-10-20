@@ -19,6 +19,39 @@ class TestMaxComputePythonFunctions:
         return {"functions": {"+runtime_version": "3.11"}}
 
     @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "direct_call.sql": """
+{{ config(materialized='table') }}
+select {{ function('double_value') }}(cast(21 as bigint)) as value
+""",
+            "raw_name_call.sql": """
+{{ config(materialized='table') }}
+select {{ target.schema }}.double_value(cast(21 as bigint)) as value
+""",
+            "ephemeral_call.sql": """
+{{ config(materialized='ephemeral') }}
+select {{ function('double_value') }}(cast(21 as bigint)) as value
+""",
+            "via_ephemeral.sql": """
+{{ config(materialized='table') }}
+select * from {{ ref('ephemeral_call') }}
+""",
+            "runtime_view.sql": """
+{{ config(materialized='view') }}
+select {{ function('double_value') }}(cast(21 as bigint)) as value
+""",
+            "via_view.sql": """
+{{ config(materialized='table') }}
+select * from {{ ref('runtime_view') }}
+""",
+            "explicit_legacy.sql": """
+{{ config(materialized='table', sql_hints={'odps.sql.python.version': 'cp37'}) }}
+select {{ function('legacy_mapping') }}(cast(42 as bigint)) as value
+""",
+        }
+
+    @pytest.fixture(scope="class")
     def functions(self):
         return {
             "double_value.py": """
@@ -106,6 +139,24 @@ functions:
     returns:
       data_type: bigint
 """,
+            "legacy_mapping.py": """
+import collections
+
+def main(value):
+    return value if isinstance({}, collections.Mapping) else 0
+""",
+            "legacy_mapping.yml": """
+functions:
+  - name: legacy_mapping
+    config:
+      entry_point: main
+      runtime_version: cp37
+    arguments:
+      - name: value
+        data_type: bigint
+    returns:
+      data_type: bigint
+""",
         }
 
     @staticmethod
@@ -130,7 +181,7 @@ functions:
     def test_scalar_and_aggregate_python_functions(self, project):
         self.create_python_library_resource(project)
         results = run_dbt(["build", "--select", "resource_type:function"])
-        assert len(results) == 4
+        assert len(results) == 5
 
         scalar = run_dbt(
             ["show", "--inline", "select {{ function('double_value') }}(21) as value"]
@@ -203,6 +254,17 @@ cross join digits d4
         )
         assert aggregate.results[0].agate_table.rows[0]["value"] == 5_000_050_000
 
+        run_dbt(["run"])
+        for model in (
+            "direct_call",
+            "raw_name_call",
+            "via_ephemeral",
+            "via_view",
+            "explicit_legacy",
+        ):
+            result = project.run_sql(f"select value from {{schema}}.{model}", fetch="one")
+            assert result[0] == 42
+
         function_path = Path(project.project_root) / "functions" / "double_value.py"
         function_path.write_text("def main(value):\n    return value * 3\n", encoding="utf-8")
         updated = run_dbt(["build", "--select", "double_value"])
@@ -242,3 +304,53 @@ cross join digits d4
 
         rebuilt = run_dbt(["build", "--select", "double_value"])
         assert len(rebuilt) == 1
+
+
+class TestLegacyPythonRuntime:
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "legacy_call.sql": """
+{{ config(materialized='table', sql_hints={'odps.sql.python.version': 'cp27'}) }}
+select {{ target.schema }}.legacy_runtime(cast(21 as bigint)) as value
+""",
+            "explicit_runtime_with_legacy_hook.sql": """
+{{ config(
+    materialized='table',
+    sql_hints={'odps.sql.python.version': 'cp311'},
+    pre_hook='set odps.sql.python.version=cp27; select ' ~ target.schema ~ '.legacy_runtime(cast(21 as bigint))'
+) }}
+select cast(1 as bigint) as value
+""",
+        }
+
+    def test_explicit_runtime_preserves_legacy_python_functions_and_hooks(self, project):
+        source = b"""from odps.udf import annotate
+
+@annotate('bigint->bigint')
+class LegacyRuntime(object):
+    def evaluate(self, value):
+        return long(value) * 2
+"""
+        with get_connection(project.adapter):
+            client = project.adapter.get_odps_client()
+            resource = client.create_resource(
+                "legacy_runtime.py",
+                "py",
+                schema=project.test_schema,
+                fileobj=io.BytesIO(source),
+            )
+            try:
+                client.create_function(
+                    "legacy_runtime",
+                    class_type="legacy_runtime.LegacyRuntime",
+                    resources=[resource],
+                    schema=project.test_schema,
+                )
+                run_dbt(["run"])
+                result = project.run_sql("select value from {schema}.legacy_call", fetch="one")
+                assert result[0] == 42
+            finally:
+                if client.exist_function("legacy_runtime", schema=project.test_schema):
+                    client.delete_function("legacy_runtime", schema=project.test_schema)
+                client.delete_resource("legacy_runtime.py", schema=project.test_schema)

@@ -262,13 +262,13 @@ class MaxComputeAdapter(SQLAdapter):
             )
         primary_key = getattr(table, "primary_key", None) if table else None
         scd_id = (column_names or {}).get("dbt_scd_id", "dbt_scd_id").lower()
-        colliding = [
-            str(column).lower() for column in (primary_key or []) if str(column).lower() != scd_id
-        ]
-        if colliding:
+        key_columns = [str(column).lower() for column in (primary_key or [])]
+        # A composite key containing the version id also distinguishes every
+        # historical version; additional data columns do not undo uniqueness.
+        if key_columns and scd_id not in key_columns:
             raise DbtRuntimeError(
                 f"Snapshot target {relation.render()} has a primary key "
-                f"({', '.join(colliding)}). A snapshot keeps the expired version "
+                f"({', '.join(key_columns)}). A snapshot keeps the expired version "
                 "and the current version of one unique key side by side, which "
                 "that key forbids: MaxCompute merges by key and the record ends "
                 "up with no current version. Let dbt create the snapshot table "
@@ -282,10 +282,10 @@ class MaxComputeAdapter(SQLAdapter):
     ) -> Optional[odps.models.Table]:
         # Sometimes the newly created table will be judged as not existing, so add retry to obtain it.
         for i in range(retry_times):
-            table = self.get_odps_client().get_table(
-                relation.identifier, relation.project, relation.schema
-            )
             try:
+                table = self.get_odps_client().get_table(
+                    relation.identifier, relation.project, relation.schema
+                )
                 table.reload()
                 return table
             except NoSuchObject:
@@ -659,6 +659,7 @@ class MaxComputeAdapter(SQLAdapter):
         ]
 
         sql_rows = []
+        dropped_relations: List[str] = []
 
         for relation in relations:
             odps_table = self.get_odps_table_by_relation(relation, 10)
@@ -667,6 +668,7 @@ class MaxComputeAdapter(SQLAdapter):
             table_name = relation.table
 
             if not odps_table:
+                dropped_relations.append(relation.render())
                 continue
 
             if odps_table.is_virtual_view:
@@ -700,9 +702,39 @@ class MaxComputeAdapter(SQLAdapter):
                 )
                 column_index += 1
 
+        if dropped_relations:
+            self._report_catalog_dropped_relations(dropped_relations)
+
         table_instance = Table(sql_rows, column_names=sql_column_names)
         results = self._catalog_filter_table(table_instance, used_schemas)
         return results
+
+    def _report_catalog_dropped_relations(self, dropped_relations: List[str]) -> None:
+        """Surface relations scheduled for the catalog whose metadata stayed unreadable.
+
+        By default the catalog build still succeeds (unchanged exit semantics) but
+        names every skipped relation in a warning. With `catalog_strict_metadata:
+        true` in the profile the build fails instead, and the exception is collected
+        by dbt-core into catalog.json `errors`, making the gap visible in the docs.
+        """
+        detail = ", ".join(dropped_relations)
+        if self._catalog_strict_metadata_enabled():
+            raise DbtRuntimeError(
+                f"catalog_strict_metadata is enabled and {len(dropped_relations)} "
+                f"relation(s) were listed for the catalog but stayed unreadable after "
+                f"retries: {detail}. Fix access to their metadata, or disable "
+                f"catalog_strict_metadata to skip them with a warning."
+            )
+        logger.warning(
+            f"Catalog skipped {len(dropped_relations)} relation(s) whose metadata "
+            f"stayed unreadable after retries: {detail}. They are missing from "
+            f"catalog.json; set catalog_strict_metadata: true in the profile to fail "
+            f"the catalog instead of skipping them."
+        )
+
+    def _catalog_strict_metadata_enabled(self) -> bool:
+        credentials = getattr(getattr(self, "config", None), "credentials", None)
+        return bool(getattr(credentials, "catalog_strict_metadata", False))
 
     # MaxCompute does not support transactions
     def clear_transaction(self) -> None:
@@ -773,6 +805,7 @@ class MaxComputeAdapter(SQLAdapter):
             "delete+insert",
             "insert_overwrite",
             "microbatch",
+            "truncate_insert",
         ]
 
     def calculate_freshness_from_metadata(

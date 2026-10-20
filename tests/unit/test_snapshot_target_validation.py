@@ -153,3 +153,8 @@ def test_leftover_staging_columns_are_refused_with_the_remedy():
     assert "dbt_unique_key_1" in message, "name the columns the user has to remove"
     assert "drop columns" in message or "new" in message
     assert "ambiguous" in message, "say what would otherwise keep happening"
+
+
+@pytest.mark.parametrize("primary_key", [["id", "dbt_scd_id"], ["DBT_SCD_ID", "ID"]])
+def test_composite_key_containing_version_id_preserves_history(primary_key):
+    _adapter(True, primary_key=primary_key).valid_snapshot_target(RELATION)
