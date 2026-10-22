@@ -22,7 +22,8 @@
             "support predicates/incremental_predicates."
         ) %}
     {% endif %}
-    {% if existing_relation is not none %}
+    {#-- Full refresh replaces the old relation; only validate an overwrite target. --#}
+    {% if existing_relation is not none and not full_refresh_mode %}
         {% if not existing_relation.is_table %}
             {% do exceptions.raise_compiler_error(
                 "The 'truncate_insert' strategy requires an existing table; "

@@ -42,6 +42,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (a `table_comment` with quotes used to make every run look like a
   configuration change, so the view was dropped and re-created).
 
+## [1.11.5] — 2026-10-22
+
+### Fixed
+
+- `truncate_insert` full-refresh no longer rejects the old target because it is
+  a view, external table, or partitioned table. View-to-table migration again
+  follows the shared rebuild path. Ordinary incremental runs still validate
+  overwrite targets; new model partition and predicate restrictions remain.
+  Full-refresh replaces the target object and does not preserve its grants.
+
 ## [1.11.4] — 2026-10-19
 
 ### Changed
