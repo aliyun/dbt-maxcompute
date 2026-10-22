@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-10-22
+
 ### Fixed
 
 - Reject Python function `overloads` before uploading resources or updating the
@@ -15,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Declare dbt Core 1.12 compatibility while retaining the tested 1.11
+  combinations and the existing minimum requirement of Core 1.11.2.
 - Test dbt Core 1.11.2, 1.11.16 and 1.12.6 explicitly in CI; pin the shared
   adapter/fixture dependencies and document the verified compatibility scope.
 - Add live regressions for overload rejection without remote changes,

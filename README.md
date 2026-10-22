@@ -30,8 +30,10 @@ adapter, please refer to the [official documentation](https://docs.getdbt.com/do
 
 ### Adapter Versioning
 
-This adapter follows [semantic versioning](https://semver.org/). The dbt Core
-1.11 and 1.12 test combinations and feature boundaries are documented in the
+This adapter follows [semantic versioning](https://semver.org/). **dbt-maxcompute
+1.12.0 adds verified compatibility with dbt Core 1.12**, while retaining support
+for the tested dbt Core 1.11 combinations (minimum 1.11.2). The exact versions
+and feature boundaries are documented in the
 [Core compatibility guide](docs/dbt-core-compatibility.md). Individual capabilities
 can have a narrower maturity level than the adapter package:
 
@@ -54,14 +56,13 @@ limitations, including remote MaxFrame DAG cancellation.
 conda create --name dbt-maxcompute-example python=3.11
 conda activate dbt-maxcompute-example
 
-pip install dbt-core
-pip install dbt-maxcompute
+python -m pip install "dbt-maxcompute==1.12.0" "dbt-core==1.12.6"
 ```
 
 To run Python models on MaxFrame, install the optional MaxFrame runtime:
 
 ```bash
-pip install "dbt-maxcompute[maxframe]"
+python -m pip install "dbt-maxcompute[maxframe]==1.12.0" "dbt-core==1.12.6"
 ```
 
 MaxFrame 2.x requires NumPy 1.x, so this extra selects PyArrow below 26. PyArrow 26
@@ -72,7 +73,7 @@ For an existing preview environment affected by this problem, upgrade to the
 release that includes the dependency guard:
 
 ```bash
-python -m pip install --upgrade "dbt-maxcompute[maxframe]==1.11.4"
+python -m pip install --upgrade "dbt-maxcompute[maxframe]==1.12.0"
 ```
 
 ### Configure dbt profile:

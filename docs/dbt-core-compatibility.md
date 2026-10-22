@@ -1,6 +1,8 @@
 # dbt Core compatibility
 
-The adapter's version and dbt Core's version do not need to match. The runtime
+Starting with dbt-maxcompute 1.12.0, dbt Core 1.12 compatibility is verified
+alongside the tested 1.11 combinations. The adapter's version and dbt Core's
+version do not need to match. The runtime
 requirement remains `dbt-core>=1.11.2`; this upgrade adds no dependency on a
 1.12-only Python API. A version accepted by the dependency resolver is not, by
 itself, a verified feature combination.
