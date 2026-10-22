@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from dbt.tests.adapter.basic.test_base import BaseSimpleMaterializations
@@ -17,6 +19,26 @@ from dbt.tests.adapter.basic.test_adapter_methods import BaseAdapterMethod
 from dbt.tests.adapter.basic.test_docs_generate import BaseDocsGenerate, BaseDocsGenReferences
 from dbt.tests.adapter.basic.test_table_materialization import BaseTableMaterialization
 from dbt.tests.adapter.basic.test_validate_connection import BaseValidateConnection
+
+
+@pytest.fixture(scope="class")
+def profile_user(dbt_profile_target):
+    """The identity the catalog reports as owner of every relation in the project.
+
+    `verify_catalog` compares each node's `metadata.owner`, and MaxCompute reports
+    the account that created the object, so the expected value is environment
+    specific rather than a property of the adapter. It comes from the profile's
+    `user` field, or `DBT_TEST_USER_1` (the same variable the grants tests use);
+    when neither is set the case is skipped with that reason instead of failing
+    with a KeyError inside the fixture.
+    """
+    user = dbt_profile_target.get("user") or os.environ.get("DBT_TEST_USER_1")
+    if not user:
+        pytest.skip(
+            "docs generate asserts the catalog owner: set the profile 'user' "
+            "field or DBT_TEST_USER_1 to the identity that owns test objects"
+        )
+    return user
 
 
 class TestSimpleMaterializationsMaxCompute(BaseSimpleMaterializations):
@@ -99,7 +121,6 @@ class TestBaseAdapterMethodMaxCompute(BaseAdapterMethod):
     """
 
 
-@pytest.mark.skip(reason="Test expect model docs have no comment, don't know why.")
 class TestDocsGenerateMaxCompute(BaseDocsGenerate):
     @pytest.fixture(scope="class")
     def expected_catalog(self, project, profile_user):
@@ -119,7 +140,6 @@ class TestDocsGenerateMaxCompute(BaseDocsGenerate):
     pass
 
 
-@pytest.mark.skip(reason="Test expect model docs have no comment, don't know why.")
 class TestDocsGenReferencesMaxCompute(BaseDocsGenReferences):
     @pytest.fixture(scope="class")
     def expected_catalog(self, project, profile_user):

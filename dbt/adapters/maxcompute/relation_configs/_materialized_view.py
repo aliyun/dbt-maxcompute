@@ -9,7 +9,7 @@ from dbt.adapters.maxcompute.relation_configs._base import MaxComputeBaseRelatio
 from dbt.adapters.maxcompute.relation_configs._partition import (
     PartitionConfig,
 )
-from dbt.adapters.maxcompute.utils import quote_string, quote_ref
+from dbt.adapters.maxcompute.utils import quote_string, quote_ref, unescape_meta_comment
 
 
 @dataclass(frozen=True, eq=True, unsafe_hash=True)
@@ -57,7 +57,9 @@ class MaxComputeMaterializedViewConfig(MaxComputeBaseRelationConfig):
             "project": table.project.name,
             "schema": schema_obj.name if schema_obj else "default",
             "lifecycle": table.lifecycle if table.lifecycle and table.lifecycle > 0 else None,
-            "table_comment": table.comment or None,
+            # 与 catalog 同一套读法：元数据里的表注释是转义形态，不还原就会每轮
+            # 都被判成"配置变了"，进而 DROP + CREATE 重建物化视图。
+            "table_comment": unescape_meta_comment(table.comment),
             "disable_rewrite": not table.is_materialized_view_rewrite_enabled,
             "partition_by": ({"fields": ",".join(partition_fields)} if partition_fields else None),
         }
