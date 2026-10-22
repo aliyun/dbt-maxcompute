@@ -1,10 +1,12 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, Iterable, List, Optional
 
 import pytest
 from dbt.cli.main import dbtRunner
-from dbt_common.exceptions import DbtRuntimeError
+from dbt.clients.jinja import MacroGenerator
+from dbt_common.exceptions import CompilationError, DbtRuntimeError, MacroReturn
 from odps.udf import BaseUDAF
 
 from dbt.adapters.maxcompute.python_udfs import (
@@ -548,3 +550,80 @@ functions:
     assert functions["function.python_udf_parse_test.sum_values"]["config"]["type"] == (
         "aggregate"
     )
+
+
+def _python_function_macro_context(model, client):
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "dbt/include/maxcompute/macros/materializations/functions/python.sql"
+    )
+    calls = []
+
+    def deploy(*args):
+        calls.append(args)
+        return MaxComputePythonUDFManager(client).deploy(make_spec())
+
+    def error(message):
+        raise CompilationError(message)
+
+    def return_value(value):
+        raise MacroReturn(value)
+
+    context = {
+        "model": model,
+        "config": {"entry_point": "main", "runtime_version": "3.11"},
+        "adapter": SimpleNamespace(create_or_update_python_udf=deploy),
+        "exceptions": SimpleNamespace(raise_compiler_error=error),
+        "return": return_value,
+    }
+    for name in ("deploy_python_function", "scalar_function_python", "aggregate_function_python"):
+        macro_name = "maxcompute__" + name
+        node = SimpleNamespace(
+            name=macro_name,
+            macro_sql=path.read_text(),
+            unique_id="macro.dbt_maxcompute." + macro_name,
+            original_file_path=str(path),
+        )
+        context[macro_name] = MacroGenerator(node, context)
+    return context, calls
+
+
+@pytest.mark.parametrize("function_type", ["scalar", "aggregate"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_overloads_fail_before_any_function_or_resource_write(function_type, existing):
+    client = FakeODPS()
+    if existing:
+        MaxComputePythonUDFManager(client).deploy(make_spec())
+    resources_before = dict(client.resources)
+    functions_before = dict(client.functions)
+    context, calls = _python_function_macro_context(
+        {"overloads": [{"defined_in": "another_signature"}]}, client
+    )
+
+    with pytest.raises(CompilationError, match="does not support function overloads"):
+        context[f"maxcompute__{function_type}_function_python"]("target")
+
+    assert calls == [], "even the root function must not be uploaded before rejection"
+    assert client.resources == resources_before
+    assert client.functions == functions_before
+    assert client.deleted_resources == []
+
+
+@pytest.mark.parametrize("overload_config", [{}, {"overloads": []}])
+def test_single_signature_functions_still_deploy_with_old_and_new_core(overload_config):
+    client = FakeODPS()
+    model = dict(
+        overload_config,
+        arguments=[{"data_type": "double"}],
+        compiled_code="def main(value): return value * 2",
+        returns={"data_type": "double"},
+    )
+    context, calls = _python_function_macro_context(model, client)
+
+    result = context["maxcompute__scalar_function_python"](
+        SimpleNamespace(render=lambda: "target")
+    )
+
+    assert len(calls) == 1
+    assert "created" in result
+    assert len(client.functions) == 1

@@ -1,4 +1,12 @@
 {% macro maxcompute__deploy_python_function(target_relation, function_type) %}
+    {% if model.get('overloads', []) %}
+        {% do exceptions.raise_compiler_error(
+            "dbt-maxcompute does not support function overloads. "
+            ~ "Define each signature as a separately named function; "
+            ~ "overloads would overwrite the same MaxCompute function."
+        ) %}
+    {% endif %}
+
     {% for argument in model.arguments %}
         {% if argument.get('default_value', none) is not none %}
             {% do exceptions.raise_compiler_error(

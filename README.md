@@ -30,9 +30,10 @@ adapter, please refer to the [official documentation](https://docs.getdbt.com/do
 
 ### Adapter Versioning
 
-This adapter follows [semantic versioning](https://semver.org/) and the dbt Core
-1.11 compatibility line. Individual capabilities can have a narrower maturity
-level than the adapter package:
+This adapter follows [semantic versioning](https://semver.org/). The dbt Core
+1.11 and 1.12 test combinations and feature boundaries are documented in the
+[Core compatibility guide](docs/dbt-core-compatibility.md). Individual capabilities
+can have a narrower maturity level than the adapter package:
 
 | Capability | Status | Intended use |
 |---|---|---|

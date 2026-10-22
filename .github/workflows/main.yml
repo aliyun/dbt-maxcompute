@@ -55,15 +55,39 @@ jobs:
       - name: Install python dependencies
         run: |
           python -m pip install --user --upgrade pip
-          python -m pip install -r dev-requirements.txt
-          python -m pip install -e .
+          python -m pip install -r dev-requirements.txt -e . "dbt-core==1.12.6"
+          python -m pip check
           python -m pip --version
           pre-commit --version
           dbt --version
       - name: Run pre-commit hooks
         run: pre-commit run --all-files --show-diff-on-failure
+
+  unit:
+    name: unit / Core ${{ matrix.dbt-core }} / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+        dbt-core: ['1.11.2', '1.11.16', '1.12.6']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install the Core test combination
+        env:
+          DBT_CORE_VERSION: ${{ matrix.dbt-core }}
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r dev-requirements.txt -e . "dbt-core==$DBT_CORE_VERSION"
+          python -m pip check
+          dbt --version
       - name: Run unit tests
-        run: pytest tests/unit tests/unit_test -q
+        run: python -m pytest tests/unit tests/unit_test -q
 
   build:
     name: build packages
@@ -109,7 +133,7 @@ jobs:
         run: |
           export is_alpha=0
           if [[ "$(ls -lh dist/)" == *"a1"* ]]; then export is_alpha=1; fi
-          echo "is_alpha=$is_alpha" >> $GITHUB_OUTPUT
+          echo "is_alpha=$is_alpha" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -155,14 +179,18 @@ jobs:
 
       - name: Install ${{ matrix.dist-type }} distributions
         run: |
-          find ./dist/*.${{ matrix.dist-type }} -maxdepth 1 -type f | xargs python -m pip install --force-reinstall --find-links=dist/
+          find ./dist/*.${{ matrix.dist-type }} -maxdepth 1 -type f -print0 | xargs -0 python -m pip install --force-reinstall --find-links=dist/ "dbt-core==1.12.6"
 
       - name: Check ${{ matrix.dist-type }} distributions
         run: |
           python -c "import dbt.adapters.maxcompute"
 
   test-maxframe-build:
-    name: verify MaxFrame extra / python 3.11
+    strategy:
+      fail-fast: false
+      matrix:
+        dbt-core: ['1.11.2', '1.11.16', '1.12.6']
+    name: verify MaxFrame extra / Core ${{ matrix.dbt-core }} / Python 3.11
     if: needs.build.outputs.is_alpha == 0
     needs: build
     runs-on: ubuntu-latest
@@ -179,10 +207,12 @@ jobs:
           path: dist/
 
       - name: Install wheel with MaxFrame extra
+        env:
+          DBT_CORE_VERSION: ${{ matrix.dbt-core }}
         run: |
           python -m pip install --upgrade pip
           wheel_path=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
-          python -m pip install "${wheel_path}[maxframe]" "dbt-core==1.11.2"
+          python -m pip install "${wheel_path}[maxframe]" "dbt-core==$DBT_CORE_VERSION"
           python -m pip check
 
       - name: Check imports and seed Arrow writer

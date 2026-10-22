@@ -29,6 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An empty or missing description no longer writes a comment: neither an empty
   string nor the literal text `None` ends up in metadata, and `docs generate`
   reports such a column as having no comment.
+- Reject Python function `overloads` before uploading resources or updating the
+  root function, preventing dbt Core 1.12 from silently replacing a previously
+  deployed signature.
+
+### Changed
+
+- Test dbt Core 1.11.2, 1.11.16 and 1.12.6 explicitly in CI; pin the shared
+  adapter/fixture dependencies and document the verified compatibility scope.
+- Add live regressions for overload rejection without remote changes,
+  `seed --empty`, `run-operation --sql` and latest-version pointer views.
 
 ### Under the hood
 
