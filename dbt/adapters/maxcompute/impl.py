@@ -122,6 +122,35 @@ class MaxComputeAdapter(SQLAdapter):
         super().__init__(config, mp_context)
         self.connections: MaxComputeConnectionManager = self.connections
 
+    @available.parse_none
+    def export_semantic_package(
+        self, name, timezone, join_type, manifest=None, output=None,
+        maxc="maxc", config=None, namespace=None, user_agent=None,
+        overwrite=False, replace_sections=False,
+    ):
+        """Prepare a local semantic proposal from the current dbt project's artifacts."""
+        from pathlib import Path
+        from dbt.adapters.maxcompute.semantic.export import MaxcClient, export_semantic
+        from dbt.adapters.maxcompute.semantic.files import ValidationError
+
+        root = Path(self.config.project_root)
+        target = root / self.config.target_path
+        def project_path(value, default):
+            candidate = Path(value) if value is not None else default
+            return str(candidate if candidate.is_absolute() else root / candidate)
+        try:
+            return export_semantic(
+                MaxcClient(maxc, project_path(config, root) if config else None,
+                           user_agent, namespace),
+                name,
+                manifest=project_path(manifest, target / "semantic_manifest.json"),
+                output=project_path(output, target / "maxagent-semantic-proposal.json"),
+                timezone=timezone, join_type=join_type,
+                overwrite=overwrite, replace_sections=replace_sections,
+            )
+        except (ValidationError, OSError) as exc:
+            raise DbtRuntimeError(str(exc)) from exc
+
     def get_odps_client(self) -> ODPS:
         conn = self.acquire_connection()
         return conn.handle.odps
