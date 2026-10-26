@@ -1,0 +1,11 @@
+profiles.yml
+target/
+logs/
+.user.yml
+.env
+.venv/
+.agents/
+.claude/
+definition.json
+proposal.json
+*-receipt.json
