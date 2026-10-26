@@ -470,3 +470,13 @@ Your feedback helps improve the project:
 
 We are committed to fostering a welcoming and inclusive environment. All community members are expected to adhere to
 the [dbt Code of Conduct](https://community.getdbt.com/code-of-conduct).
+
+## Export dbt semantic definitions
+
+Use the adapter-provided macro through dbt's existing entry point: `dbt run-operation dbt_maxcompute.export_semantic_package --args '{name: sales, timezone: UTC, join_type: LEFT}'`. See the [Chinese guide](docs/semantic-export.zh-CN.md) for installation, supported semantics, and the separate maxc review/publish workflow.
+
+Install the semantic package export preview (Python 3.12 recommended):
+
+```bash
+python -m pip install 'dbt-core==1.12.6' 'dbt-maxcompute[semantic]==1.12.1b1' 'maxc-cli==0.9.5b1'
+```
