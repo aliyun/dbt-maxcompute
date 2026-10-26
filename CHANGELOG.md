@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.12.1b1 (unreleased)
+## 1.12.1b1 — 2026-10-26 (preview)
 
 - Add adapter-owned `dbt run-operation dbt_maxcompute.export_semantic_package`, optional `semantic` conversion dependencies and a Chinese guide. Read dbt manifests and live schemas through the public maxc JSON interface; write only local revision-bound proposals.
 

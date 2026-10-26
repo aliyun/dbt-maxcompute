@@ -124,9 +124,18 @@ class MaxComputeAdapter(SQLAdapter):
 
     @available.parse_none
     def export_semantic_package(
-        self, name, timezone, join_type, manifest=None, output=None,
-        maxc="maxc", config=None, namespace=None, user_agent=None,
-        overwrite=False, replace_sections=False,
+        self,
+        name,
+        timezone,
+        join_type,
+        manifest=None,
+        output=None,
+        maxc="maxc",
+        config=None,
+        namespace=None,
+        user_agent=None,
+        overwrite=False,
+        replace_sections=False,
     ):
         """Prepare a local semantic proposal from the current dbt project's artifacts."""
         from pathlib import Path
@@ -135,18 +144,23 @@ class MaxComputeAdapter(SQLAdapter):
 
         root = Path(self.config.project_root)
         target = root / self.config.target_path
+
         def project_path(value, default):
             candidate = Path(value) if value is not None else default
             return str(candidate if candidate.is_absolute() else root / candidate)
+
         try:
             return export_semantic(
-                MaxcClient(maxc, project_path(config, root) if config else None,
-                           user_agent, namespace),
+                MaxcClient(
+                    maxc, project_path(config, root) if config else None, user_agent, namespace
+                ),
                 name,
                 manifest=project_path(manifest, target / "semantic_manifest.json"),
                 output=project_path(output, target / "maxagent-semantic-proposal.json"),
-                timezone=timezone, join_type=join_type,
-                overwrite=overwrite, replace_sections=replace_sections,
+                timezone=timezone,
+                join_type=join_type,
+                overwrite=overwrite,
+                replace_sections=replace_sections,
             )
         except (ValidationError, OSError) as exc:
             raise DbtRuntimeError(str(exc)) from exc

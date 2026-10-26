@@ -76,7 +76,9 @@ def filter_sql(template: str, model: dict[str, Any], columns: dict[str, str]) ->
             or node.dyn_kwargs
         ):
             raise ValueError("Only one-argument Dimension references are supported")
-    entities = {item["name"] for item in model["entities"] if item["type"] in ("primary", "unique")}
+    entities = {
+        item["name"] for item in model["entities"] if item["type"] in ("primary", "unique")
+    }
     dimensions = {item["name"]: item.get("expr") or item["name"] for item in model["dimensions"]}
 
     def dimension(reference: str) -> str:
@@ -217,7 +219,9 @@ def convert(
             )
             or params.get("fill_nulls_with") is not None
         ):
-            raise ValueError("Window, time spine fill, or private metric semantics are unsupported")
+            raise ValueError(
+                "Window, time spine fill, or private metric semantics are unsupported"
+            )
         result: dict[str, Any] = {
             "name": metric["name"],
             "description": metric.get("description") or metric["name"],
@@ -241,8 +245,8 @@ def convert(
                     raise ValueError(
                         "Only direct-column or COALESCE row expressions have qualified aggregate type inference"
                     )
-            columns = list(tree.find_all(exp.Column))
-            types = {columns_by_model[name][column.name] for column in columns}
+            expression_columns = list(tree.find_all(exp.Column))
+            types = {columns_by_model[name][column.name] for column in expression_columns}
             if len(types) != 1:
                 raise ValueError("Expression type inference requires one physical scalar type")
             result.update(

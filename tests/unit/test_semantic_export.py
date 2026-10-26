@@ -15,8 +15,15 @@ class Client:
     def __init__(self):
         self.calls = []
         self.snapshot = {
-            "format": "maxc.semantic/v1", "source": "USER_DRAFT", "revisionId": "old",
-            "identity": {"endpoint": "https://example.test", "namespace": "123", "specName": "sales", "specId": "id"},
+            "format": "maxc.semantic/v1",
+            "source": "USER_DRAFT",
+            "revisionId": "old",
+            "identity": {
+                "endpoint": "https://example.test",
+                "namespace": "123",
+                "specName": "sales",
+                "specId": "id",
+            },
             "object": {"dataScope": {"dataReferences": []}},
             "content": {"glossary": [{"term": "keep"}]},
         }
@@ -29,12 +36,23 @@ class Client:
     def describe(self, relation):
         self.calls.append("metadata")
         cols = {
-            "orders": [("order_id", "INT"), ("customer_id", "INT"), ("ordered_at", "TIMESTAMP"), ("amount", "DECIMAL(18,2)"), ("status", "STRING")],
+            "orders": [
+                ("order_id", "INT"),
+                ("customer_id", "INT"),
+                ("ordered_at", "TIMESTAMP"),
+                ("amount", "DECIMAL(18,2)"),
+                ("status", "STRING"),
+            ],
             "customers": [("customer_id", "INT"), ("region", "STRING")],
         }
-        return {"table_name": relation["alias"], "project": relation["database"], "schema_name": relation["schema_name"],
-                "columns": [{"name": n, "type": t} for n, t in cols[relation["alias"]]],
-                "has_more_columns": False, "partition_columns": self.partitions}
+        return {
+            "table_name": relation["alias"],
+            "project": relation["database"],
+            "schema_name": relation["schema_name"],
+            "columns": [{"name": n, "type": t} for n, t in cols[relation["alias"]]],
+            "has_more_columns": False,
+            "partition_columns": self.partitions,
+        }
 
 
 @pytest.fixture
@@ -46,7 +64,9 @@ def case(tmp_path):
 
 def run(case, **kw):
     c, source, out = case
-    return export_semantic(c, "sales", manifest=str(source), output=str(out), timezone="UTC", join_type="LEFT", **kw)
+    return export_semantic(
+        c, "sales", manifest=str(source), output=str(out), timezone="UTC", join_type="LEFT", **kw
+    )
 
 
 def test_export_preserves_revision_and_unowned_sections(case):
@@ -77,7 +97,8 @@ def test_volatile_manifest_metadata_does_not_change_content(case):
     first = run(case)
     doc = read_json(str(out))
     c.snapshot = doc
-    manifest = read_json(str(source)); manifest["metadata"] = {"generated_at": "new"}
+    manifest = read_json(str(source))
+    manifest["metadata"] = {"generated_at": "new"}
     source.write_text(json.dumps(manifest))
     second = run(case, overwrite=True)
     assert first["dbtDefinitionSha256"] == second["dbtDefinitionSha256"]
@@ -88,7 +109,8 @@ def test_volatile_manifest_metadata_does_not_change_content(case):
 def test_failures_do_not_emit_proposal(case, failure):
     c, source, out = case
     if failure == "window":
-        doc = read_json(str(source)); doc["metrics"][0]["type_params"]["window"] = {"count": 7}
+        doc = read_json(str(source))
+        doc["metrics"][0]["type_params"]["window"] = {"count": 7}
         source.write_text(json.dumps(doc))
     elif failure == "partition":
         c.partitions = [{"name": "ds", "type": "STRING"}]
@@ -105,23 +127,29 @@ def test_failures_do_not_emit_proposal(case, failure):
 
 def test_command_uses_public_json_cli_without_shell(monkeypatch):
     calls = []
+
     def fake(args, **kwargs):
         calls.append((args, kwargs))
-        return SimpleNamespace(returncode=0, stdout='{"status":"success","data":{"table":{"columns":[]}}}')
+        return SimpleNamespace(
+            returncode=0, stdout='{"status":"success","data":{"table":{"columns":[]}}}'
+        )
+
     monkeypatch.setattr("subprocess.run", fake)
     client = MaxcClient("/bin/maxc", "/config with spaces", "ua", "123")
     client.read("sales")
-    assert client.describe({"database": "p", "schema_name": "s", "alias": "orders"}) == {"columns": []}
+    assert client.describe({"database": "p", "schema_name": "s", "alias": "orders"}) == {
+        "columns": []
+    }
     assert "--namespace" in calls[0][0]
     assert "--metadata-only" in calls[1][0]
     assert calls[0][0][2] == "/config with spaces"
     assert all("shell" not in kwargs for _, kwargs in calls)
 
 
-
 def test_dbt_adapter_operation_uses_project_target_and_wraps_errors(case, monkeypatch):
     from dbt.adapters.maxcompute.impl import MaxComputeAdapter
     from dbt_common.exceptions import DbtRuntimeError
+
     c, source, output = case
     project = source.parent
     monkeypatch.setattr("dbt.adapters.maxcompute.semantic.export.MaxcClient", lambda *a: c)

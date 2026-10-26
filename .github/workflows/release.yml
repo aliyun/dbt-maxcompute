@@ -44,7 +44,7 @@ jobs:
         run: |
           python -m pip install --user --upgrade pip
           python -m pip install -r dev-requirements.txt
-          python -m pip install -e ".[maxframe]"
+          python -m pip install -e ".[maxframe,semantic]"
           python -m pip --version
           dbt --version
 

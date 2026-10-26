@@ -12,16 +12,25 @@ semantic.yml → dbt run-operation（解析当前项目）
 
 业务语义仍由项目中的 `semantic.yml` 定义，Agent 可辅助生成并运行 dbt 验证。导出器转换已有定义，保留经过声明的指标口径、时间维度与实体关联，不自动猜测新的业务关系。
 
-## 安装开发试用版
+## 安装试用版
 
-本功能尚未发布到 PyPI。请使用配套构建的两个 wheel；此前 `maxc semantic import-dbt` 及独立 `dbt-maxcompute semantic export` 入口均已移除。
+建议使用独立的 Python 3.12 虚拟环境。执行一条命令安装已验证的版本组合：
 
 ```shell
-python -m pip install './dist/dbt_maxcompute-1.12.1b1-py3-none-any.whl[semantic]' \
-  './dist/maxc_cli-0.9.5.dev2-py3-none-any.whl'
+python -m pip install 'dbt-core==1.12.6' 'dbt-maxcompute[semantic]==1.12.1b1' 'maxc-cli==0.9.5b1'
 ```
 
-正式发布后，适配器安装形式为 `pip install 'dbt-maxcompute[semantic]'`。该 extra 增加 SQLGlot/Jinja 转换依赖；maxc 是独立工具，通过公开 JSON 命令协议协作。当前配套 maxc 须包含 namespace/Catalog 修复及 `meta describe --metadata-only`；旧版无法执行完整导出链路。
+`semantic` 扩展包含 SQLGlot/Jinja 转换依赖。maxc 使用独立的命令行 JSON 接口，负责认证、表结构读取和语义包操作。版本固定后无需再添加 `--pre`；普通 `pip install -U dbt-maxcompute` 仍优先选择正式版。
+
+确认安装结果：
+
+```shell
+dbt --version
+maxc --version
+maxc meta describe --help
+```
+
+maxc 应为 0.9.5b1，帮助中应包含 `--metadata-only`。该功能当前面向独立 Python 入口 `maxc`；`aliyun maxc` 的内置运行时需等对应分发版本更新。
 
 从适配器源码开发时使用 `python -m pip install -e '.[semantic]'`。宏随适配器安装，无需用户复制宏或新增 `packages.yml` 依赖。
 
