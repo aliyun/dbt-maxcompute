@@ -9,17 +9,19 @@ from dbt.tests.adapter.persist_docs.test_persist_docs import (
 from dbt.tests.adapter.persist_docs import fixtures
 from dbt.tests.util import run_dbt
 
-_MODELS__VIEW = """
-{{ config(materialized='table') }}
-select 2 as id, 'Bob' as name
-"""
 
-
+# MaxCompute can persist docs onto a view: the relation comment goes through
+# `CREATE OR REPLACE VIEW ... COMMENT ... AS ...`, column comments through
+# `ALTER VIEW ... CHANGE COLUMN ... COMMENT`. The class below is the full
+# upstream battery (table + view + undocumented model) and passes against a
+# real project; the old "not supported" note and the unused `_MODELS__VIEW`
+# override that hid the view did not.
 class TestPersistDocsToView(BasePersistDocs):
     pass
 
 
-# Note: Not support persist docs to view.
+# A narrower variant with the view model removed, so the table path and a model
+# without any docs are checked on their own.
 class TestPersistDocsRedshift(BasePersistDocs):
     @pytest.fixture(scope="class")
     def models(self):
