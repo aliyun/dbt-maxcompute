@@ -142,6 +142,7 @@ and a bare count goes stale:
 | Python 3.12.3, dbt-core 1.11.2, pyodps 0.13.2, pytest 9.1.1 | the compatibility line README declares, adapter installed from this source tree | `94efbbc`, 2026-09-26 | minimal set 6/6 (389 s); `--suite core` 20/20 (1180 s) |
 | Python 3.10.21, dbt-core 1.12.5, dbt-common 1.39.0, dbt-adapters 1.24.5, dbt-tests-adapter 1.20.0, pytest 9.1.1, alibabacloud-credentials 1.0.12 | what `pip install -r dev-requirements.txt && pip install -e .` resolves to, i.e. what this workflow job installs | `94efbbc`, 2026-09-26 | minimal set 6/6 (379 s); 136 unit tests; 246 functional tests collected |
 | the same CI resolution, on the current line | the entry re-checked against a moved master, after its own merge | `ffda401`, 2026-10-15 | 223 unit tests pass; 314 functional tests collect and `-m integration_smoke` still selects exactly 6; live minimal set **6/6 in 1031.95 s** with `cleanup: ok (6 schemas created by this run, all dropped)` |
+| Python 3.12.3, dbt-core 1.11.2, pyodps 0.13.2, pytest 9.1.1 | matrix leg 1 as the workflows pin it today, re-checked against a master that moved 15 commits since this PR's base | `cc0ab25`, 2026-10-28 | `-m integration_smoke` now selects 16 of 325 functional tests (test_core_112.py 5, test_minimal_sql_set.py 6, test_truncate_insert.py 5); live: `executed=11 passed=11 failed=0 errors=0 skipped=6` in 700.91 s (0:11:40), cleanup: ok (7 schemas created by this run, all dropped), status:  PASSED (server-side evidence produced) |
 
 Same six cases, 17 minutes on 2026-10-15 against 6.5 minutes on 2026-09-26: this
 project was queueing heavy statements at 80-140 s each in the evening while
@@ -154,10 +155,15 @@ that run. The entry reported it as an error, which is the point; the delay is th
 adapter's, and it is tracked separately.
 
 Note the asymmetry rather than reading past it: `setup.py` bounds `dbt-core` as
-`>=1.11.2` with no upper bound, so a CI install lands on 1.12.5 while README
-declares "the dbt Core 1.11 compatibility line". Both suites passed on both
-resolutions here, but the declared window is a compatibility statement about the
-adapter, not about this test entry, and this change does not alter it.
+`>=1.11.2` with no upper bound, so a plain `pip install -e .` outside the workflows
+still floats to whatever Core is newest. Inside the workflows the version is now
+pinned - `integration.yml` and `main.yml` both name '1.11.2','1.11.16','1.12.6' - which is
+why every row above states the leg it was measured on. The skips in the last row
+are capability gates, not failures: `requires dbt Core 1.12` and
+`requires dbt-maxcompute[maxframe]`; the Core-1.12 cases are expected to execute on that leg, which
+was not measured here. Both suites passed on every resolution tried locally, but
+the declared window is a compatibility statement about the adapter, not about this
+test entry, and this change does not alter it.
 
 ## Run it in CI
 
