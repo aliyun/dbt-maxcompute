@@ -440,7 +440,7 @@ Two things to watch when installing these packages:
 
 * Several `packages.yml` files reference a branch (`revision: main`) instead of a tag, so a build is
   only reproducible if you commit `package-lock.yml`; `dbt-data-reliability` has no release tag yet.
-  Pinned refs and the lock-file workflow are spelled out below (checked against the live remotes on 2026-10-16).
+  Pinned refs and the lock-file workflow are spelled out below (checked against the live remotes on 2026-10-29).
 * dbt needs a three-tier MaxCompute project (`project.schema.table`). On a two-tier project, `dbt build`
   fails up front with `ODPS-0110061 Invalid database operations on two-tier model`.
 
@@ -474,7 +474,7 @@ of truth, and it is what a rebuild months later runs.
 |---|---|---|
 | [dbt-utils](https://github.com/dingxin-tech/dbt-utils) | `a8f1c6f612da282aa05655d6d3a70beccf516700` | the `1.3.0-mc.1` tag is `3463ce1e4…` while `main` is `a8f1c6f61…`; pin the sha you actually tested |
 | [dbt-date](https://github.com/dingxin-tech/dbt-date) | `0.10.1-mc.1` | tag, and it equals `main` (`80b5dca27…`) |
-| [dbt-expectations](https://github.com/dingxin-tech/dbt-expectations) | `b3e2fa2c5ba64dfacbdad4d699c41847ce7f4a9a` | the `0.10.4-mc.1` tag is `2c896488f…` while `main` is `b3e2fa2c5…`; pin the sha you actually tested |
+| [dbt-expectations](https://github.com/dingxin-tech/dbt-expectations) | `5882c035c43d4487ca99732a40fcf31b9605cd7b` | the `0.10.4-mc.1` tag is `2c896488f…` while `main` is `5882c035c…`; pin the sha you actually tested |
 | [dbt-project-evaluator](https://github.com/dingxin-tech/dbt-project-evaluator) | `d603d32b2c25e02fc965cd31ba1f8cf7c8c81103` | the `1.0.0-mc.1` tag is `d0a400e7a…` while `main` is `d603d32b2…`; pin the sha you actually tested |
 | [elementary](https://github.com/dingxin-tech/elementary) | `0.16.4-mc.1` | tag, and it equals `main` (`684a0d21b…`) |
 | [dbt-data-reliability](https://github.com/dingxin-tech/dbt-data-reliability) | `9ec0685e6f47ba78b3c1aa574f6ab34c657a904f` | no release tag exists in this repository, so a sha is the only immutable ref |
