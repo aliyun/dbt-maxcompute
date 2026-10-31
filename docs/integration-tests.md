@@ -92,11 +92,13 @@ Exit codes:
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Cases ran against the project and all passed |
+| 0 | Cases ran against the project, all passed, and the schemas this run created were verified gone |
 | 1 | Cases ran and at least one failed, or test schemas were left behind |
-| 2 | **Blocked** - no credentials, a two-tier project, or the project was unreachable. Nothing reached a server, so this is never reported as a pass |
+| 2 | **No verdict** - and deliberately not two different kinds of "fine": either nothing reached a server (no credentials, a two-tier project, the project unreachable), or cases ran but the residue check could not be read. Never reported as a pass |
 
-Cases skipped because credentials are missing also make the script exit `2`.
+Cases skipped because credentials are missing also make the script exit `2`, and so
+does a run whose cleanup could not be checked - see the exit-status block in
+`scripts/run-integration-tests.sh --help`.
 
 ### Unrelated breakage is reported, not absorbed
 
@@ -128,7 +130,11 @@ asked for them. Checking "did any `test*` schema
 appear while I was running" was the first version, and it is wrong on a shared
 project: measured on 2026-09-26, an unrelated `test*` schema created mid-run
 made a fully passing suite report `6 passed, 1 error` and exit `1`. If no names
-were recorded the script says `cleanup: UNKNOWN` instead of inventing a verdict.
+were recorded, or the project's schema list cannot be read, the script says
+`cleanup: UNKNOWN` and ends the run `NO-VERDICT` with exit `2` instead of
+inventing a verdict or rounding it up to `PASSED`. The promise this entry exists
+for is that nothing reads green that was not checked, and an unverified cleanup is
+exactly that case; before this change it exited `0`.
 Running `pytest` directly is fine too: every case that needs a server is
 skipped with the reason computed by `tests/maxcompute_gating.py`.
 

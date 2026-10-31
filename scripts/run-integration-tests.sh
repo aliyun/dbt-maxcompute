@@ -18,11 +18,13 @@
 #      auth_type: chain, so access keys stay in the environment and are never
 #      copied into the repository.
 #
-# Exit status:
-#   0  cases ran on the server and all passed
+# Exit status (the three cases are deliberately not collapsed):
+#   0  cases ran on the server, all passed, and the schemas this run created were
+#      verified gone
 #   1  cases ran and at least one failed, or a schema this run created survived
-#   2  integration could not run: no credentials, two-tier project, or the
-#      project was unreachable. No evidence was produced.
+#   2  no verdict, never a pass: either integration could not run (no credentials,
+#      two-tier project, project unreachable - so no evidence was produced), or
+#      cases ran but the schema-residue check could not be read.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,6 +34,8 @@ PYTHON="${PYTHON:-python3}"
 GATE="$REPO_ROOT/tests/maxcompute_gating.py"
 SUITE="smoke"
 PASSTHROUGH=()
+# Set only when the residue check could not be evaluated; see the exit-status block.
+NO_VERDICT=""
 
 die() {
   echo "$*" >&2
@@ -64,7 +68,8 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     --help | -h)
-      sed -n '2,25p' "${BASH_SOURCE[0]}"  # the header comment block, without the code
+      awk 'NR > 1 && /^#/ { print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}"
+      # the whole leading comment block, whatever length it grows to
       exit 0
       ;;
     --)
@@ -223,6 +228,9 @@ fi
 
 if [ "$RECORDED" = "0" ]; then
   # Nothing recorded: the suite either skipped, or was run without this script.
+  # Either way there is no name list to check residue against - that is a missing
+  # verdict, not a clean result.
+  NO_VERDICT="this run recorded no schemas, so nothing was checked against residue"
   echo "  cleanup: UNKNOWN - this run recorded no schemas (the suite's own assertion still applies)"
 elif LEAKED="$("$PYTHON" "$GATE" leftover-schemas 2>&1)"; then
   if [ -n "$LEAKED" ]; then
@@ -230,11 +238,18 @@ elif LEAKED="$("$PYTHON" "$GATE" leftover-schemas 2>&1)"; then
   fi
   echo "  cleanup: ok (${RECORDED} schemas created by this run, all dropped)"
 else
+  NO_VERDICT="the project's schema list could not be read, so residue is unverified"
   echo "  cleanup: UNKNOWN - cannot list the project's schemas: $(printf '%s' "$LEAKED" | head -1)"
 fi
 echo "  cases:   server-side assertions are listed under SERVER[...] in the run output"
 
 if [ "$rc" != "0" ]; then
   finish "FAILED (${outcome})" 1
+fi
+if [ -n "$NO_VERDICT" ]; then
+  # Cases reached the server, so this is not the BLOCKED case; but the promise
+  # "the schemas this run created are gone" was not verified, so it is not a pass
+  # either. Report it as its own third state instead of rounding it up to green.
+  finish "NO-VERDICT - ${SUMMARY}, but ${NO_VERDICT} (not a leak report, not a pass)" 2
 fi
 finish "PASSED (server-side evidence produced)" 0
