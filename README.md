@@ -13,6 +13,18 @@
 Welcome to the **dbt-maxCompute** repository! This project aims to extend the capabilities of **dbt** (data build tool)
 for users of Alibaba MaxCompute, a cutting-edge data processing platform.
 
+## 用 Agent 把业务口径发布为 MaxCompute 语义包（试用）
+
+让 Agent 根据业务需求编写 dbt 指标、时间维度和关联配置，经过数据验证与差异审阅后，保存为 MaxCompute 中的 Published 语义包，供具备读取能力的 MaxAgent 分析会话复用。团队可以在 Git 中维护口径，在发布时审阅变化，让“支付收入怎么算、订单如何关联客户”成为可复用的业务定义。
+
+**[从业务需求到语义包：完整中文教程](docs/agent-semantic-package-tutorial.zh-CN.md)** 包含官方 Skill 安装、Agent 提示词、三张示例表的构建过程、完整 YAML、云端结果核对及发布回读步骤，并提供[可运行项目](examples/agent-semantic-package)。
+
+```bash
+python -m pip install 'dbt-core==1.12.6' 'dbt-maxcompute[semantic]==1.12.1b1' 'maxc-cli==0.9.5b1'
+```
+
+当前导出范围为 simple/ratio、UTC 和单跳 LEFT 关联。更多参数见[导出参考](docs/semantic-export.zh-CN.md)。
+
 ## What is dbt?
 
 **[dbt](https://www.getdbt.com/)** empowers data analysts and engineers to transform their data using software
@@ -30,9 +42,12 @@ adapter, please refer to the [official documentation](https://docs.getdbt.com/do
 
 ### Adapter Versioning
 
-This adapter follows [semantic versioning](https://semver.org/) and the dbt Core
-1.11 compatibility line. Individual capabilities can have a narrower maturity
-level than the adapter package:
+This adapter follows [semantic versioning](https://semver.org/). **dbt-maxcompute
+1.12.0 adds verified compatibility with dbt Core 1.12**, while retaining support
+for the tested dbt Core 1.11 combinations (minimum 1.11.2). The exact versions
+and feature boundaries are documented in the
+[Core compatibility guide](docs/dbt-core-compatibility.md). Individual capabilities
+can have a narrower maturity level than the adapter package:
 
 | Capability | Status | Intended use |
 |---|---|---|
@@ -53,14 +68,13 @@ limitations, including remote MaxFrame DAG cancellation.
 conda create --name dbt-maxcompute-example python=3.11
 conda activate dbt-maxcompute-example
 
-pip install dbt-core
-pip install dbt-maxcompute
+python -m pip install "dbt-maxcompute==1.12.0" "dbt-core==1.12.6"
 ```
 
 To run Python models on MaxFrame, install the optional MaxFrame runtime:
 
 ```bash
-pip install "dbt-maxcompute[maxframe]"
+python -m pip install "dbt-maxcompute[maxframe]==1.12.0" "dbt-core==1.12.6"
 ```
 
 MaxFrame 2.x requires NumPy 1.x, so this extra selects PyArrow below 26. PyArrow 26
@@ -71,7 +85,7 @@ For an existing preview environment affected by this problem, upgrade to the
 release that includes the dependency guard:
 
 ```bash
-python -m pip install --upgrade "dbt-maxcompute[maxframe]==1.11.4"
+python -m pip install --upgrade "dbt-maxcompute[maxframe]==1.12.0"
 ```
 
 ### Configure dbt profile:
@@ -468,3 +482,13 @@ Your feedback helps improve the project:
 
 We are committed to fostering a welcoming and inclusive environment. All community members are expected to adhere to
 the [dbt Code of Conduct](https://community.getdbt.com/code-of-conduct).
+
+## Export dbt semantic definitions
+
+Use the adapter-provided macro through dbt's existing entry point: `dbt run-operation dbt_maxcompute.export_semantic_package --args '{name: sales, timezone: UTC, join_type: LEFT}'`. See the [Chinese guide](docs/semantic-export.zh-CN.md) for installation, supported semantics, and the separate maxc review/publish workflow.
+
+Install the semantic package export preview (Python 3.12 recommended):
+
+```bash
+python -m pip install 'dbt-core==1.12.6' 'dbt-maxcompute[semantic]==1.12.1b1' 'maxc-cli==0.9.5b1'
+```

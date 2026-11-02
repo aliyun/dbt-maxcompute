@@ -1,0 +1,13 @@
+semantic_package_demo:
+  target: dev
+  outputs:
+    dev:
+      type: maxcompute
+      threads: 1
+      project: "{{ env_var('MAXCOMPUTE_PROJECT') }}"
+      schema: "{{ env_var('MAXCOMPUTE_SCHEMA', 'default') }}"
+      endpoint: "{{ env_var('MAXCOMPUTE_ENDPOINT') }}"
+      auth_type: access_key
+      access_key_id: "{{ env_var('ALIBABA_CLOUD_ACCESS_KEY_ID') }}"
+      access_key_secret: "{{ env_var('ALIBABA_CLOUD_ACCESS_KEY_SECRET') }}"
+      timezone: UTC

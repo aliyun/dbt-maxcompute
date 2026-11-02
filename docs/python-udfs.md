@@ -14,7 +14,7 @@ MaxCompute clients.
 
 ## Supported scope
 
-- dbt Core 1.11 or later;
+- dbt Core 1.11 and 1.12 within the [tested combinations](dbt-core-compatibility.md);
 - Python scalar UDFs defined as standard dbt Python functions;
 - Python aggregate UDFs implemented with the MaxCompute `BaseUDAF` lifecycle;
 - dbt DAG dependencies through `{{ function('name') }}`;
@@ -51,6 +51,17 @@ MaxCompute selects the Python runtime at SQL session level rather than storing
 it in function metadata. The dbt `runtime_version` config controls source
 validation and compatibility reporting; callers of a legacy `cp37` function
 must therefore also use a `cp37` SQL session hint.
+
+## Function overloads
+
+Function overloads introduced in dbt Core 1.12 are not supported. MaxCompute
+function deployment in this adapter updates one catalog function per name;
+multiple signatures would replace that same function. A non-empty `overloads`
+list raises a compilation error before uploading resources or changing the
+root function, including when that function already exists.
+
+Define each signature under a different function name instead. Functions without
+`overloads`, or with an empty list, retain their existing deployment behavior.
 
 ## Scalar UDF quick start
 

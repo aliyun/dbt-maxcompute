@@ -1,0 +1,68 @@
+version: 2
+
+models:
+  - name: orders
+    description: One row per order; UTC order time; paid-only metrics.
+    semantic_model:
+      enabled: true
+    agg_time_dimension: ordered_at
+    columns:
+      - name: order_id
+        data_tests: [unique, not_null]
+        entity:
+          type: primary
+          name: order
+      - name: customer_id
+        entity:
+          type: foreign
+          name: customer
+      - name: ordered_at
+        data_tests: [not_null]
+        granularity: day
+        dimension:
+          type: time
+      - name: status
+        dimension:
+          type: categorical
+    metrics:
+      - name: paid_revenue
+        description: Sum of paid amounts with NULL amounts treated as zero.
+        label: Paid revenue
+        type: simple
+        agg: sum
+        expr: coalesce(amount, 0)
+        filter: "{{ Dimension('order__status') }} = 'paid'"
+      - name: paid_orders
+        description: Paid order count including orders with NULL amount.
+        label: Paid orders
+        type: simple
+        agg: count
+        expr: order_id
+        filter: "{{ Dimension('order__status') }} = 'paid'"
+      - name: paid_aov
+        description: Paid revenue divided by paid orders.
+        label: Paid average order value
+        type: ratio
+        numerator: paid_revenue
+        denominator: paid_orders
+  - name: customers
+    description: One row per customer; current region, no historical versions.
+    semantic_model:
+      enabled: true
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+        entity:
+          type: primary
+          name: customer
+      - name: region
+        dimension:
+          type: categorical
+  - name: time_spine
+    description: Contiguous daily calendar for the experiment.
+    time_spine:
+      standard_granularity_column: date_day
+    columns:
+      - name: date_day
+        granularity: day
+        data_tests: [unique, not_null]

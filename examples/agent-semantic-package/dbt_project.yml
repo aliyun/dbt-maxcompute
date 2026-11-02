@@ -1,0 +1,11 @@
+name: semantic_package_demo
+version: '1.0'
+config-version: 2
+profile: semantic_package_demo
+model-paths: [models]
+vars:
+  table_prefix: "{{ env_var('SEMANTIC_DEMO_PREFIX') }}"
+models:
+  semantic_package_demo:
+    +materialized: table
+    +lifecycle: 7

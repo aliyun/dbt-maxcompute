@@ -210,9 +210,6 @@ def test_python_staging_uses_same_overwrite_and_cleans_its_relations():
         ({"partitions": ["2026-01-01"]}, {}, "non-partitioned"),
         ({"predicates": ["id > 1"]}, {}, "entire table"),
         ({"incremental_predicates": ["id > 1"]}, {}, "entire table"),
-        ({}, {"partitioned": True}, "target is partitioned"),
-        ({}, {"existing": TARGET.incorporate(type="view")}, "existing table"),
-        ({}, {"existing": TARGET.incorporate(type="external")}, "existing table"),
     ],
 )
 @pytest.mark.parametrize("full_refresh", [False, True])
@@ -223,6 +220,61 @@ def test_invalid_new_strategy_fails_before_hooks_or_writes(values, kwargs, messa
     with pytest.raises(CompilationError, match=message):
         _run(context)
     assert events == []
+
+
+@pytest.mark.parametrize(
+    "kwargs,message",
+    [
+        ({"partitioned": True}, "target is partitioned"),
+        ({"existing": TARGET.incorporate(type="external")}, "existing table"),
+    ],
+)
+@pytest.mark.parametrize("full_refresh", [False, True])
+def test_invalid_existing_target_is_rejected_when_full_refresh_is_disabled(
+    kwargs, message, full_refresh
+):
+    context, events = _context(
+        {"incremental_strategy": "truncate_insert", "full_refresh": False},
+        full_refresh=full_refresh,
+        **kwargs,
+    )
+    with pytest.raises(CompilationError, match=message):
+        _run(context)
+    assert events == []
+
+
+@pytest.mark.parametrize(
+    "existing,partitioned,full_refresh",
+    [
+        (TARGET.incorporate(type="view"), False, False),
+        (TARGET.incorporate(type="view"), False, True),
+        (TARGET, True, True),
+        (TARGET.incorporate(type="external"), False, True),
+        (TARGET, False, True),
+    ],
+)
+@pytest.mark.parametrize("language", ["sql", "python"])
+def test_rebuild_skips_old_target_metadata(existing, partitioned, full_refresh, language):
+    context, events = _context(
+        {"incremental_strategy": "truncate_insert"},
+        existing=existing,
+        partitioned=partitioned,
+        full_refresh=full_refresh,
+        language=language,
+    )
+    context["adapter"].get_odps_table_by_relation = lambda relation: pytest.fail(
+        "rebuilding must not inspect metadata of the old target"
+    )
+    _run(context)
+    statements = [event for event in events if event[0] == "statement"]
+    assert any("create table" in event[2] for event in statements)
+    assert not any("insert overwrite" in event[2] for event in statements)
+    if language == "sql":
+        assert events.index(("drop", "target")) < events.index(statements[0])
+    else:
+        assert ("rename", "target", "target__dbt_bak") in events
+        assert ("rename", "target__dbt_int", "target") in events
+        assert ("drop", "target__dbt_bak") in events
 
 
 def test_unreadable_target_metadata_does_not_allow_an_unchecked_overwrite():
@@ -381,7 +433,8 @@ def test_existing_project_strategy_overrides_keep_partition_and_refresh_behavior
         assert ("drop", "target") not in events
 
 
-def test_real_external_table_metadata_is_rejected_before_hooks_or_writes():
+@pytest.mark.parametrize("full_refresh", [False, True])
+def test_real_external_table_metadata_is_checked_only_for_incremental_runs(full_refresh):
     table = Table(
         name="target",
         parent=Project(name="project"),
@@ -393,8 +446,15 @@ def test_real_external_table_metadata_is_rejected_before_hooks_or_writes():
     )
     relation = MaxComputeRelation.from_odps_table(table)
     assert relation.is_table  # External ODPS tables share this dbt relation type.
-    context, events = _context({"incremental_strategy": "truncate_insert"}, existing=relation)
+    context, events = _context(
+        {"incremental_strategy": "truncate_insert"}, existing=relation, full_refresh=full_refresh
+    )
     context["adapter"].get_odps_table_by_relation = lambda relation: table
+    if full_refresh:
+        _run(context)
+        assert ("drop", "target") in events
+        assert any("create table" in event[2] for event in events if event[0] == "statement")
+        return
     with pytest.raises(CompilationError, match="external"):
         _run(context)
     assert events == []

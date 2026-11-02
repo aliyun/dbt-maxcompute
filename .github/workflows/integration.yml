@@ -94,7 +94,11 @@ jobs:
           echo "profile secret is available: the integration job will contact a MaxCompute project"
 
   integration:
-    name: minimal SQL set (live MaxCompute project)
+    name: minimal SQL set / Core ${{ matrix.dbt-core }} (live MaxCompute project)
+    strategy:
+      fail-fast: false
+      matrix:
+        dbt-core: ['1.11.2', '1.11.16', '1.12.6']
 
     needs: gate
 
@@ -116,10 +120,12 @@ jobs:
           python-version: '3.10'
 
       - name: Install python dependencies
+        env:
+          DBT_CORE_VERSION: ${{ matrix.dbt-core }}
         run: |
           python -m pip install --user --upgrade pip
-          python -m pip install --retries 5 -r dev-requirements.txt
-          python -m pip install --retries 5 -e .
+          python -m pip install --retries 5 -r dev-requirements.txt -e . "dbt-core==$DBT_CORE_VERSION"
+          python -m pip check
           python -m pip --version
           dbt --version
 

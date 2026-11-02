@@ -1,11 +1,43 @@
 # Changelog
 
+## 1.12.1b1 — 2026-10-26 (preview)
+
+- Add adapter-owned `dbt run-operation dbt_maxcompute.export_semantic_package`, optional `semantic` conversion dependencies and a Chinese guide. Read dbt manifests and live schemas through the public maxc JSON interface; write only local revision-bound proposals.
+
+
 All notable changes to `dbt-maxcompute` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [1.12.0] — 2026-10-22
+
+### Fixed
+
+- Reject Python function `overloads` before uploading resources or updating the
+  root function, preventing dbt Core 1.12 from silently replacing a previously
+  deployed signature.
+
+### Changed
+
+- Declare dbt Core 1.12 compatibility while retaining the tested 1.11
+  combinations and the existing minimum requirement of Core 1.11.2.
+- Test dbt Core 1.11.2, 1.11.16 and 1.12.6 explicitly in CI; pin the shared
+  adapter/fixture dependencies and document the verified compatibility scope.
+- Add live regressions for overload rejection without remote changes,
+  `seed --empty`, `run-operation --sql` and latest-version pointer views.
+
+## [1.11.5] — 2026-10-22
+
+### Fixed
+
+- `truncate_insert` full-refresh no longer rejects the old target because it is
+  a view, external table, or partitioned table. View-to-table migration again
+  follows the shared rebuild path. Ordinary incremental runs still validate
+  overwrite targets; new model partition and predicate restrictions remain.
+  Full-refresh replaces the target object and does not preserve its grants.
 
 ## [1.11.4] — 2026-10-19
 
