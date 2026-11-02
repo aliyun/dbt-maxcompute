@@ -1,3 +1,4 @@
+import inspect
 from dataclasses import dataclass
 from typing import Optional
 
@@ -7,6 +8,37 @@ from dbt.adapters.contracts.connection import Credentials
 from odps import ODPS
 from odps import options
 from odps.accounts import CredentialProviderAccount
+
+
+# Upstream PyODPS recovers a failed get_credential() by calling
+# get_credentials() with no arguments.  That is the API of
+# alibabacloud-credentials < 1.0; newer versions keep the same name as a static
+# factory that requires a config, so the recovery call raises TypeError and,
+# because the except block keeps no reference to the original error, the caller
+# sees a signature mismatch instead of the credential problem.
+# Stopgap until every supported PyODPS carries the upstream fix: keep the
+# legacy path for providers that really have it, otherwise let the original
+# error propagate.
+def _legacy_provider_credential(provider):
+    """Return a credential from a legacy no-argument ``get_credentials()``.
+
+    ``None`` means the provider does not offer that API, in which case the
+    caller must keep the error raised by ``get_credential()``.
+    """
+    get_credentials = getattr(provider, "get_credentials", None)
+    if get_credentials is None:
+        return None
+    try:
+        parameters = inspect.signature(get_credentials).parameters.values()
+    except (TypeError, ValueError):
+        return None
+    if any(
+        parameter.default is parameter.empty
+        and parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+        for parameter in parameters
+    ):
+        return None
+    return get_credentials()
 
 
 class _CopySafeCredentialProviderAccount(CredentialProviderAccount):
@@ -20,6 +52,30 @@ class _CopySafeCredentialProviderAccount(CredentialProviderAccount):
         # it between nested MaxFrame option contexts is the correct behavior.
         memo[id(self)] = self
         return self
+
+    def _refresh_credential(self):
+        """Refresh without letting the legacy fallback hide the real error."""
+        try:
+            credential = self.provider.get_credential()
+        except Exception:
+            credential = _legacy_provider_credential(self.provider)
+            if credential is None:
+                raise
+
+        access_id = credential.get_access_key_id()
+        secret_access_key = credential.get_access_key_secret()
+        sts_token = credential.get_security_token()
+
+        with self._refresh_lock:
+            if self.access_id and access_id == self.access_id:
+                return
+
+            # invalidate signature date only when token changed
+            self._last_signature_date = None
+
+            self.access_id = access_id
+            self.secret_access_key = secret_access_key
+            self.sts_token = sts_token
 
 
 @dataclass
