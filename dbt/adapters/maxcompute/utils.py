@@ -59,7 +59,7 @@ def quote_string(value: Optional[str]) -> str:
 def unescape_meta_comment(value: Optional[str]) -> Optional[str]:
     r"""还原元数据接口返回的表级注释，使它与用户写下的描述逐字相等。
 
-    实测（见工作项 record.md 与 evidence/raw/probe-comment-*）：GetTable 以转义形态
+    实测：GetTable 以转义形态
     返回**表级**注释（`"` 变成 `\"`、真换行变成两字符的 `\n`、`\` 变成 `\\`），而
     **列**注释原样返回。不还原就会把转义垃圾写进 catalog.json 与 docs 页面，也会让
     物化视图的配置比对每轮都以为注释变了。空串按"没有注释"处理——dbt 的 catalog
