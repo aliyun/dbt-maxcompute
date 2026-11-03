@@ -677,7 +677,7 @@ class MaxComputeAdapter(SQLAdapter):
                 table_type = "MATERIALIZED_VIEW"
             else:
                 table_type = "TABLE"
-            # 表级注释在元数据接口里是转义形态，列注释不是（实测见工作项 record）；
+            # 表级注释在元数据接口里是转义形态，列注释不是（回归见 tests/functional/adapter/test_persist_docs.py）；
             # 还原之后 catalog.json 里的文本才等于用户写下的描述，空注释统一为 None。
             table_comment = unescape_meta_comment(odps_table.comment)
             table_owner = odps_table.owner
