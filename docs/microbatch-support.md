@@ -164,9 +164,13 @@ cases are indistinguishable today where the boundary is written. That is this ad
 not a limit dbt imposes: the model's own declared `partition_by` - already the thing that decides
 whether a table is auto-partitioned at all - does reach the point where the relation is built. So
 narrowing the shift to the types it helps, or refusing the combination outright, are both implementable
-here; both also hinge on a declaration rather than on the column's physical type, and a declaration
-that disagrees with the data is a case not measured here. Either way that is a product decision about
-which contract to keep, so this pull request documents the behaviour instead of making it. Until one
+here; both also hinge on a declaration rather than on the column's physical type - and nothing
+downstream checks that declaration. Measured: an `input` column typed `timestamp_ntz` whose model
+declares `partition_by` as `timestamp` builds and runs on this branch's code, and then behaves
+exactly like the naive row above (first window writes two partitions, the second window erases the
+row the first one wrote). So a declaration-based guard protects honestly-declared models and quietly
+does nothing for a mismatched one. Either way which contract to keep is a product decision, so this
+pull request documents the behaviour instead of making it. Until one
 of them lands, a `microbatch` model partitioned on `timestamp_ntz` or `date` should keep `timezone`
 unset - the measurement above is why that advice is not cosmetic: for `timestamp_ntz` on a non-UTC
 session the shift is not a no-op, it takes a combination that drops no rows today and gives it the
