@@ -13,18 +13,6 @@
 Welcome to the **dbt-maxCompute** repository! This project aims to extend the capabilities of **dbt** (data build tool)
 for users of Alibaba MaxCompute, a cutting-edge data processing platform.
 
-## 用 Agent 把业务口径发布为 MaxCompute 语义包（试用）
-
-让 Agent 根据业务需求编写 dbt 指标、时间维度和关联配置，经过数据验证与差异审阅后，保存为 MaxCompute 中的 Published 语义包，供具备读取能力的 MaxAgent 分析会话复用。团队可以在 Git 中维护口径，在发布时审阅变化，让“支付收入怎么算、订单如何关联客户”成为可复用的业务定义。
-
-**[从业务需求到语义包：完整中文教程](docs/agent-semantic-package-tutorial.zh-CN.md)** 包含官方 Skill 安装、Agent 提示词、三张示例表的构建过程、完整 YAML、云端结果核对及发布回读步骤，并提供[可运行项目](examples/agent-semantic-package)。
-
-```bash
-python -m pip install 'dbt-core==1.12.6' 'dbt-maxcompute[semantic]==1.12.1b1' 'maxc-cli==0.9.5b1'
-```
-
-当前导出范围为 simple/ratio、UTC 和单跳 LEFT 关联。更多参数见[导出参考](docs/semantic-export.zh-CN.md)。
-
 ## What is dbt?
 
 **[dbt](https://www.getdbt.com/)** empowers data analysts and engineers to transform their data using software
@@ -63,15 +51,18 @@ limitations, including remote MaxFrame DAG cancellation.
 
 ### Install the plugin
 
+Use the standard adapter installation for SQL models and commands such as `dbt run`,
+`dbt test`, and `dbt build`.
+
 ```bash
-# Python 3.11 is a reproducible baseline for MaxFrame custom-UDF workloads.
 conda create --name dbt-maxcompute-example python=3.11
 conda activate dbt-maxcompute-example
 
 python -m pip install "dbt-maxcompute==1.12.0" "dbt-core==1.12.6"
 ```
 
-To run Python models on MaxFrame, install the optional MaxFrame runtime:
+To run Python models on MaxFrame, install the optional MaxFrame runtime. Python
+3.11 is the baseline for MaxFrame custom UDF workloads.
 
 ```bash
 python -m pip install "dbt-maxcompute[maxframe]==1.12.0" "dbt-core==1.12.6"
@@ -88,7 +79,7 @@ release that includes the dependency guard:
 python -m pip install --upgrade "dbt-maxcompute[maxframe]==1.12.0"
 ```
 
-### Configure dbt profile:
+### Configure the dbt profile
 
 1. Create a file in the ~/.dbt/ directory named profiles.yml.
 2. Copy the following and paste into the new profiles.yml file. Make sure you update the values where noted.
@@ -107,7 +98,7 @@ jaffle_shop: # this needs to match the profile in your dbt_project.yml file
       access_key_secret: XXX # Replace this with your accessKey(sk)
 ```
 
-Currently we support the following parameters：
+MaxCompute profiles accept the following fields.
 
 | **Field**           | **Description**                                                                                             | **Default Value**                     |
 |---------------------|-------------------------------------------------------------------------------------------------------------|---------------------------------------|
@@ -148,7 +139,7 @@ While dbt core provides native configurations like `materialized` and `sql_heade
 **dbt-maxcompute specific configurations** that control table creation behavior during materialization.
 
 For Append and PK Delta Table creation with SQL `table` and `incremental` models, see
-[Delta Table support and configuration (中文)](docs/delta-tables.md).
+[Delta Table support and configuration (Chinese)](docs/delta-tables.md).
 
 For `materialized='snapshot'`, see [Snapshot support on MaxCompute](docs/snapshot-support.md):
 which strategies and target tables hold history, how hard deletes are opted into, and
@@ -487,6 +478,20 @@ To upgrade a dependency: change the ref, `rm -rf dbt_packages package-lock.yml &
 re-run `dbt build` against a three-tier project, and commit `packages.yml` together with the new
 `package-lock.yml` so the pair can be reverted as one unit.
 
+## Optional semantic package export
+
+Publish dbt metric definitions, time dimensions, and entity relationships as a
+MaxCompute semantic package. MaxAgent analysis sessions with read access can
+reuse the published definitions.
+
+To try this preview, install `dbt-maxcompute[semantic]` and explicitly invoke
+`dbt run-operation dbt_maxcompute.export_semantic_package` to generate a local
+proposal. Use `maxc` to review the proposal, apply it to a draft, and publish the
+package.
+
+- [Agent tutorial with a runnable example (Chinese)](docs/agent-semantic-package-tutorial.zh-CN.md)
+- [Installation and export reference (Chinese)](docs/semantic-export.zh-CN.md)
+
 ## Known Limitations
 
 Due to MaxCompute engine characteristics, the following limitations apply:
@@ -525,13 +530,3 @@ Your feedback helps improve the project:
 
 We are committed to fostering a welcoming and inclusive environment. All community members are expected to adhere to
 the [dbt Code of Conduct](https://community.getdbt.com/code-of-conduct).
-
-## Export dbt semantic definitions
-
-Use the adapter-provided macro through dbt's existing entry point: `dbt run-operation dbt_maxcompute.export_semantic_package --args '{name: sales, timezone: UTC, join_type: LEFT}'`. See the [Chinese guide](docs/semantic-export.zh-CN.md) for installation, supported semantics, and the separate maxc review/publish workflow.
-
-Install the semantic package export preview (Python 3.12 recommended):
-
-```bash
-python -m pip install 'dbt-core==1.12.6' 'dbt-maxcompute[semantic]==1.12.1b1' 'maxc-cli==0.9.5b1'
-```
