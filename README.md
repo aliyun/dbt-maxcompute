@@ -484,10 +484,10 @@ Publish dbt metric definitions, time dimensions, and entity relationships as a
 MaxCompute semantic package. MaxAgent analysis sessions with read access can
 reuse the published definitions.
 
-To try this preview, install `dbt-maxcompute[semantic]` and explicitly invoke
-`dbt run-operation dbt_maxcompute.export_semantic_package` to generate a local
-proposal. Use `maxc` to review the proposal, apply it to a draft, and publish the
-package.
+The preview uses dbt Core 1.12, `dbt-maxcompute[semantic]`, and `maxc-cli`.
+Run `dbt run-operation dbt_maxcompute.export_semantic_package` with the export
+settings to generate a local proposal. Use `maxc` to review the proposal, apply it
+to a draft, and publish the package.
 
 - [Agent tutorial with a runnable example (Chinese)](docs/agent-semantic-package-tutorial.zh-CN.md)
 - [Installation and export reference (Chinese)](docs/semantic-export.zh-CN.md)
