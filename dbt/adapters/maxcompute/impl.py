@@ -181,6 +181,8 @@ class MaxComputeAdapter(SQLAdapter):
         user_agent=None,
         entity_names=None,
         time_mapping=None,
+        primary_keys=None,
+        totals_only=None,
     ):
         """Generate a new dbt project from a fixed Published semantic package."""
         from pathlib import Path
@@ -212,6 +214,8 @@ class MaxComputeAdapter(SQLAdapter):
                 time_spine_end=time_spine_end,
                 entity_names=entity_names,
                 time_mapping=time_mapping,
+                primary_keys=primary_keys,
+                totals_only=totals_only,
             )
         except (ValidationError, OSError, TypeError) as exc:
             raise DbtRuntimeError(str(exc)) from exc

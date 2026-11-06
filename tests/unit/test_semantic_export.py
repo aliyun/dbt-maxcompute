@@ -293,3 +293,114 @@ def test_import_preserves_existing_project_and_rejects_partitioned_sources(publi
     with pytest.raises(ValidationError, match="partitioned sources"):
         reverse(published, output=str(output.parent / "other"))
     assert not (output.parent / "other").exists()
+
+
+def test_import_preserves_quoted_dimensions_and_reviewed_totals_only_models(
+    published, monkeypatch
+):
+    client, output = published
+    content = client.snapshot["content"]
+    model = content["semanticModel"]
+    orders = model["logicalTables"][0]
+    orders.pop("primaryKey")
+    orders.pop("timeDimensions")
+    orders["synonyms"] = ["Order records"]
+    orders["dimensions"][0].update(
+        name="order__state",
+        expr="`order status`",
+        synonyms=["State"],
+        isEnum=True,
+        enumValues=[{"value": "paid"}],
+    )
+    orders["dimensions"].extend(
+        [
+            {"name": "order_id", "expr": "order_id", "dataType": "INTEGER"},
+            {"name": "source_flag", "expr": "`from`", "dataType": "STRING"},
+        ]
+    )
+    for item in model["namedFilters"]:
+        item["sqlFragment"] = item["sqlFragment"].replace("status", "`order status`")
+    content["instructions"]["timeConventions"] = []
+    for metric in content["metricDefinitions"]:
+        metric.pop("timeDimension", None)
+        metric.pop("visibility", None)
+    describe = client.describe
+
+    def quoted_metadata(relation):
+        result = describe(relation)
+        if relation["alias"] == "orders":
+            result["columns"].append({"name": "from", "type": "STRING"})
+        for column in result["columns"]:
+            if column["name"] == "status":
+                column["name"] = "order status"
+        return result
+
+    monkeypatch.setattr(client, "describe", quoted_metadata)
+    with pytest.raises(ValidationError, match=r"primary_keys.orders"):
+        reverse(published)
+    with pytest.raises(ValidationError, match=r"opt in to totals_only"):
+        reverse(published, primary_keys={"orders": "order_id"})
+    result = reverse(
+        published,
+        primary_keys={"orders": "order_id"},
+        totals_only=["orders"],
+    )
+    assert result["totalsOnlyModels"] == ["orders"]
+    docs = yaml.safe_load((output / "models/semantic.yml").read_text())
+    orders_yml = docs["models"][0]
+    assert orders_yml["semantic_model"]["config"]["meta"]["semantic_package"]["synonyms"] == [
+        "Order records"
+    ]
+    state = next(
+        c for c in orders_yml["columns"] if c.get("dimension", {}).get("name") == "order_state"
+    )
+    assert state["dimension"]["config"]["meta"]["semantic_package"] == {
+        "synonyms": ["State"],
+        "isEnum": True,
+        "enumValues": [{"value": "paid"}],
+        "source_name": "order__state",
+        "source_column": "order status",
+    }
+    assert orders_yml["derived_semantics"]["dimensions"][0]["expr"] == "order_id"
+    assert orders_yml["metrics"][0]["filter"] == "{{ Dimension('orders__order_state') }} = 'paid'"
+    assert orders_yml["metrics"][0]["agg_time_dimension"] == "unresolved_import_time"
+    assert (
+        orders_yml["metrics"][0]["config"]["meta"]["semantic_package"]["visibility"]
+        == "unspecified"
+    )
+    sql = (output / "models/orders.sql").read_text()
+    assert f"`order status` as `{state['name']}`" in sql
+    reserved = next(
+        c for c in orders_yml["columns"] if c.get("dimension", {}).get("name") == "source_flag"
+    )
+    assert reserved["name"].startswith("sp_from_")
+    assert f"`from` as `{reserved['name']}`" in sql
+    assert "cast(null as date) as `unresolved_import_time`" in sql
+
+
+def test_totals_only_cannot_replace_published_aggregation_time(published):
+    with pytest.raises(ValidationError, match=r"totals_only.orders"):
+        reverse(published, totals_only=["orders"])
+
+
+def test_import_rejects_template_code_in_annotation_metadata(published):
+    client, output = published
+    client.snapshot["content"]["semanticModel"]["logicalTables"][0]["synonyms"] = [
+        "{{ env_var('SECRET') }}"
+    ]
+    with pytest.raises(
+        ValidationError, match="metadata must not contain executable template delimiters"
+    ):
+        reverse(published)
+    assert not output.exists()
+
+
+def test_export_rejects_totals_only_placeholder(case):
+    _, manifest, output = case
+    data = json.loads(manifest.read_text())
+    dimension = next(d for d in data["semantic_models"][0]["dimensions"] if d["type"] == "time")
+    dimension["config"] = {"meta": {"semantic_package": {"totals_only": True}}}
+    manifest.write_text(json.dumps(data))
+    with pytest.raises(ValidationError, match="totals-only technical date"):
+        run(case)
+    assert not output.exists()

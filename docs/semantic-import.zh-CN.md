@@ -65,19 +65,28 @@ mf query --metrics paid_revenue,paid_orders,paid_aov --group-by customers__regio
 
 ## 审阅手工语义包
 
-当前覆盖非分区表、单列主键、单跳 LEFT 多对一关系、UTC 日粒度、直接列维度，以及 simple 和同模型同时间维度的 ratio 指标。simple 支持 SUM、COUNT、COUNT_DISTINCT、AVG、MIN、MAX，行表达式限直接列和 COALESCE。命名过滤器可引用同一逻辑表的分类维度。ratio 的公式采用 `分子 / NULLIF(分母, 0)`。
+当前覆盖非分区表、单列主键、单跳 LEFT 多对一关系、直接列维度，以及 simple 和同模型同时间维度的 ratio 指标。simple 支持 SUM、COUNT、COUNT_DISTINCT、AVG、MIN、MAX，行表达式支持直接列和 COALESCE。命名过滤器可引用同一逻辑表的分类维度。ratio 的公式采用 `分子 / NULLIF(分母, 0)`。
 
-正向导出器写入的时间约定可以识别。手工定义仅提供自然语言时间说明时，先请业务人员确认，再把结构化映射加入 `args`。下面的映射确认订单时间是 UTC 日粒度，并用作该模型的默认聚合时间。
+同义词、枚举值和用法说明写入 `config.meta.semantic_package`。当物理列名包含空格或特殊符号时，生成视图会引用原始带引号的列名，并投影为 dbt 可用的别名。维度名中的连续下划线会规范化，元数据保留原字段名。命名过滤器和指标表达式随映射更新。
+
+### 核实主键和时间候选
+
+Agent 可先读取固定 Published revision 和表结构，再从字段定义中提出主键候选。用实际数据对照 `COUNT(*)`、`COUNT(候选列)` 和 `COUNT(DISTINCT 候选列)`，字符串键还需检查空白值。记录字段含义、覆盖率和歧义，核实后以 `primary_keys` 提供包中缺失的主键。导入器生成 `unique` 和 `not_null` 数据测试。跨表关系沿用包中已批准的关联。
+
+对时间候选，先检查非空数和取值范围，再判断时间代表业务事件、状态变化还是记录维护。原生 DATE 列可保留为日粒度维度。只有包中明确的默认时间或经审阅的 `time_mapping` 会成为业务聚合时间。下面的示例为订单指定缺失的主键和已确认的聚合时间。
 
 ```json
 {
+  "primary_keys": {"orders": "order_id"},
   "time_mapping": {
     "orders.ordered_at": {"timezone": "UTC", "granularity": "day", "default": true}
   }
 }
 ```
 
-Agent 可以阅读快照和转换错误，提出候选映射，业务人员核实后再导入。原文说明和已验证查询留在本地快照中供审阅。遇到无法表达的字段，导入报告其位置并停止生成项目。分区策略、累计和窗口指标、SCD、复合键、跨模型比率和额外 JOIN 条件在本原型的支持范围之外。
+业务时间仍待确认时，可把对应逻辑表加入 `"totals_only": ["orders"]`，以验证总量。该选项生成值为 NULL 的技术日期来满足 MetricFlow 的计划要求，保留原有日期维度供审阅。转换报告会记录这一选择，正向导出要求先补齐业务时间映射。原包未声明的指标可见性标为待审阅。
+
+原文说明、未绑定指标的命名过滤器和已验证查询留在本地快照中。分区策略、累计和窗口指标、SCD、复合键、跨模型比率和额外 JOIN 条件会报出阻塞字段。
 
 **空结果计数**。验收的 MetricFlow 版本将 COUNT 编译为对 0/1 表达式求和，输入为空时返回 NULL。原始 dbt 项目和导回后的项目行为一致，MaxCompute 的 SQL COUNT 基准返回 0。客单价在两边均为 NULL。请把空输入结果列为迁移验收用例。
 

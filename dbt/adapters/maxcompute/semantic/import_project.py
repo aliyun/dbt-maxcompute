@@ -13,7 +13,17 @@ import yaml
 from dbt.adapters.maxcompute.utils import quote_ref
 
 from .files import MAX_FILE_BYTES, ValidationError, digest, safe_path
-from .reverse import LOGICAL_NAME, PHYSICAL_NAME, Table, convert, record, table_bindings, token
+from .reverse import (
+    LOGICAL_NAME,
+    PHYSICAL_NAME,
+    UNRESOLVED_TIME,
+    Table,
+    convert,
+    items,
+    record,
+    table_bindings,
+    token,
+)
 
 TIME_SPINE = "import_time_spine"
 
@@ -97,7 +107,13 @@ def model_files(
             }
         source = sources[scope]
         source["tables"].append({"name": name, "identifier": identifier})
-        projection = ",\n       ".join(quote_ref(column) for column in table.columns)
+        projections = [
+            quote_ref(column) if column == alias else f"{quote_ref(column)} as {quote_ref(alias)}"
+            for column, alias in table.projection.items()
+        ]
+        if table.totals_only:
+            projections.append(f"cast(null as date) as {quote_ref(UNRESOLVED_TIME)}")
+        projection = ",\n       ".join(projections)
         files[f"models/{name}.sql"] = (
             f"select {projection}\nfrom {{{{ source('{source['name']}', '{name}') }}}}\n"
         )
@@ -182,6 +198,8 @@ def import_semantic(
     time_spine_end: str,
     entity_names: dict | None = None,
     time_mapping: dict | None = None,
+    primary_keys: dict | None = None,
+    totals_only: list | None = None,
 ) -> dict:
     token(name, "name")
     token(revision, "revision")
@@ -239,6 +257,8 @@ def import_semantic(
         metadata,
         entity_names=record({} if entity_names is None else entity_names, "entity_names"),
         time_mapping=record({} if time_mapping is None else time_mapping, "time_mapping"),
+        primary_keys=record({} if primary_keys is None else primary_keys, "primary_keys"),
+        totals_only=items([] if totals_only is None else totals_only, "totals_only"),
     )
     snapshot_hash = digest(document)
     files = model_files(tables, bindings, aliases, start, end)
@@ -273,6 +293,7 @@ def import_semantic(
         "metrics": metrics,
         "relationships": relationships,
         "entityNames": {model: table.entity for model, table in tables.items()},
+        "totalsOnlyModels": [name for name, table in tables.items() if table.totals_only],
         "reviewNotes": notes,
         "remoteMutations": False,
     }
