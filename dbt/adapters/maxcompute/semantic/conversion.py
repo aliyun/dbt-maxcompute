@@ -142,6 +142,11 @@ def convert(
         primary_targets[primary[0]["name"]] = (name, key)
         table["primaryKey"] = {"columns": [key]}
         for dimension in model["dimensions"]:
+            meta = (dimension.get("config") or {}).get("meta") or {}
+            if (meta.get("semantic_package") or {}).get("totals_only") is True:
+                raise ValueError(
+                    "A totals-only technical date requires a business time mapping before export"
+                )
             value = dimension.get("expr") or dimension["name"]
             if value not in columns:
                 raise ValueError("Computed dimension type requires an explicit mapping")
