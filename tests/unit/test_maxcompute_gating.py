@@ -280,6 +280,33 @@ class TestPreflightVerdict:
         assert "did not resolve a credential" in reason
         assert "not reachable" not in reason
 
+    def test_provider_refresh_failure_is_called_a_credential_problem(self, tmp_path, monkeypatch):
+        """The provider sentence #54 made reachable, also as a credential problem.
+
+        #54 stops pyodps' legacy recovery from hiding a dynamic provider that
+        cannot be reached, so its own sentence becomes a text the preflight has
+        to classify.  Measured on master ``505c8a6b`` with a credential-less
+        ``auth_type: chain`` profile: the arity ``TypeError`` is still what
+        surfaces there (see the test above, which pins it) while this sentence
+        arrives as provider retry output - so both texts have to be called
+        credential problems, not one instead of the other.
+        """
+        self._chain_profile_with_env_keys(tmp_path, monkeypatch)
+        self._probe_raises(
+            monkeypatch,
+            Exception(
+                "Refresh credentials failed, cached value is None, error: "
+                "HTTPConnectionPool(host='100.100.100.200', port=80): Max retries "
+                "exceeded with url: /latest/meta-data/ram/security-credentials/ "
+                "(Caused by ConnectTimeoutError(..., 'Connection to 100.100.100.200 "
+                "timed out. (connect timeout=1.0)'))"
+            ),
+        )
+        reason = maxcompute_gating.preflight_reason()
+        assert reason is not None
+        assert "did not resolve a credential" in reason
+        assert "not reachable" not in reason
+
     def test_unreachable_project_is_not_called_a_credential_problem(self, tmp_path, monkeypatch):
         self._chain_profile_with_env_keys(tmp_path, monkeypatch)
         self._probe_raises(monkeypatch, OSError("[Errno 111] Connection refused"))
