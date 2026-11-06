@@ -9,6 +9,7 @@ import yaml
 from dbt.adapters.maxcompute.semantic.export import MaxcClient, export_semantic
 from dbt.adapters.maxcompute.semantic.files import ValidationError, read_json
 from dbt.adapters.maxcompute.semantic.import_project import import_semantic
+from dbt.adapters.maxcompute.semantic.reverse import normalized_joins
 
 FIXTURE = Path(__file__).parent / "fixtures/dbt_semantic_latest.json"
 
@@ -218,6 +219,75 @@ def test_import_binds_published_tables_and_generates_reviewable_project(publishe
     assert orders["metrics"][2]["type"] == "ratio"
     assert orders["metrics"][2]["denominator"] == "paid_orders"
     assert spine["time_spine"]["standard_granularity_column"] == "date_day"
+
+
+def test_import_preserves_relationships_without_metrics_or_source_primary_key(published):
+    client, output = published
+    content = client.snapshot["content"]
+    content.pop("metricDefinitions")
+    semantic = content["semanticModel"]
+    orders, customers = semantic["logicalTables"]
+    orders.pop("primaryKey")
+    dim = customers["dimensions"][0]
+    dim.update(name="year", tags=["odps.binding:physical-column"])
+    [link] = semantic["approvedRelationships"]
+    link.update(
+        leftTable="customers",
+        rightTable="orders",
+        joinType="RIGHT",
+        relationshipCardinality="ONE_TO_MANY",
+        joinCondition="customers.customer_id = orders.customer_id",
+        relationshipId="catalog-id",
+        sourceDetail={"kind": "catalog"},
+    )
+    with pytest.raises(ValidationError, match="relationship targets require"):
+        reverse(published, unkeyed_models=["customers"])
+    with pytest.raises(ValidationError, match=r"orders.primaryKey: column is missing"):
+        reverse(published, primary_keys={"orders": None})
+    assert not output.exists()
+
+    result = reverse(published, unkeyed_models=["orders"])
+    assert result["metrics"] == 0 and result["relationships"] == 1
+    assert result["unkeyedModels"] == ["orders"]
+    assert any("Converted 1 RIGHT ONE_TO_MANY" in note for note in result["reviewNotes"])
+    orders, customers, _ = yaml.safe_load((output / "models/semantic.yml").read_text())["models"]
+    assert orders["primary_entity"] == "orders"
+    assert all("data_tests" not in col for col in orders["columns"])
+    assert [col["entity"] for col in orders["columns"] if "entity" in col] == [
+        {"name": "customers", "type": "foreign"}
+    ]
+    dimension = next(col["dimension"] for col in customers["columns"] if "dimension" in col)
+    assert dimension["name"] == "dim_year"
+    assert dimension["config"]["meta"]["semantic_package"] == {
+        "source_name": "year",
+        "tags": ["odps.binding:physical-column"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("pairs", "error"),
+    [
+        ([("races", "seasons"), ("races", "seasons")], "explicit role mappings"),
+        ([("races", "seasons"), ("seasons", "races")], "cyclic or ambiguous path"),
+        ([("races", "seasons"), ("results", "seasons")], "cyclic or ambiguous path"),
+        ([("races", "seasons"), ("seasons", "series")], "exceeds two hops"),
+    ],
+)
+def test_import_rejects_unrepresentable_join_paths(pairs, error):
+    bindings = {name: ("p", "s", name) for name in ("results", "races", "seasons", "series")}
+    links = [
+        {
+            "name": f"rel_{i}",
+            "leftTable": source,
+            "rightTable": target,
+            "joinType": "LEFT",
+            "relationshipCardinality": "MANY_TO_ONE",
+            "relationshipColumns": [{"leftColumn": "key", "rightColumn": "id"}],
+        }
+        for i, (source, target) in enumerate([("results", "races"), *pairs])
+    ]
+    with pytest.raises(ValidationError, match=error):
+        normalized_joins(links, bindings)
 
 
 @pytest.mark.parametrize(

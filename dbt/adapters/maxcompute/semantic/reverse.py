@@ -16,6 +16,13 @@ from .files import ValidationError, digest
 
 LOGICAL_NAME = re.compile(r"(?!.*__)[a-z][a-z0-9_]{0,62}")
 PACKAGE_ELEMENT_NAME = re.compile(r"[a-z][a-z0-9_]{0,127}")
+RELATIONSHIP_NAME = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,1023}")
+MAX_JOIN_HOPS = 2
+# Reserved names in the dbt Core 1.12 semantic manifest validator.
+RESERVED_DIMENSION_NAMES = frozenset(
+    "nanosecond microsecond millisecond second minute hour day week month quarter year "
+    "metric_time mf_internal_uuid".split()
+)
 PHYSICAL_NAME = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]{0,127}")
 TOKEN = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,254}")
 CONVENTION = re.compile(
@@ -166,7 +173,7 @@ def annotation_config(obj: dict, path: str, **lineage: Any) -> dict:
     meta = {
         **{
             key: obj[key]
-            for key in ("synonyms", "isEnum", "enumValues", "usageGuidance")
+            for key in ("synonyms", "isEnum", "enumValues", "usageGuidance", "tags")
             if key in obj
         },
         **lineage,
@@ -182,7 +189,7 @@ def annotation_config(obj: dict, path: str, **lineage: Any) -> dict:
 class Table:
     name: str
     entity: str
-    key: str
+    key: str | None
     physical: dict[str, str]
     model: dict[str, Any]
     columns: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -309,9 +316,11 @@ def add_dimensions(table: Table, obj: dict, path: str, mappings: dict[str, dict]
             record(
                 dim,
                 location,
-                "name expr dataType description usageGuidance synonyms isEnum enumValues",
+                "name expr dataType description usageGuidance synonyms isEnum enumValues tags",
             )
-            name = re.sub(r"_+", "_", original)
+            name = re.sub(r"_+", "_", original).rstrip("_")
+            if len(name) == 1 or name in RESERVED_DIMENSION_NAMES:
+                name = f"dim_{name}"
             if len(name) > 63:
                 name = f"{name[:49].rstrip('_')}_{digest(original)[:12]}"
             if name in names:
@@ -321,7 +330,9 @@ def add_dimensions(table: Table, obj: dict, path: str, mappings: dict[str, dict]
             alias = table.view_column(column, location)
             kind = table.type_of(column, location)
             if dim.get("dataType") != kind:
-                raise ValidationError(f"{location}.dataType: does not match live column type")
+                raise ValidationError(
+                    f"{location}.dataType: declared {dim.get('dataType')!r} does not match live {kind}"
+                )
             dimension: dict[str, Any] = {
                 "type": "time" if section == "timeDimensions" else "categorical",
                 "name": name,
@@ -367,43 +378,42 @@ def add_dimensions(table: Table, obj: dict, path: str, mappings: dict[str, dict]
             table.annotate(column, location, **properties)
 
 
-def add_relationships(tables: dict[str, Table], value: Any) -> int:
-    links = named(value, "approvedRelationships")
-    sources: set[str] = set()
-    targets: set[str] = set()
-    pairs: set[tuple[str, str]] = set()
-    for name, obj in links.items():
+@dataclass(frozen=True)
+class Join:
+    fact: str
+    dimension: str
+    foreign_key: str
+    target_key: str
+    reversed_from_right: bool
+
+
+def normalized_joins(value: Any, bindings: dict[str, Binding]) -> list[Join]:
+    joins = []
+    edges: dict[str, set[str]] = {}
+    for name, obj in named(value, "approvedRelationships", RELATIONSHIP_NAME).items():
         path = f"approvedRelationships.{name}"
         record(
             obj,
             path,
             "name leftTable rightTable relationshipCardinality joinType relationshipColumns "
-            "joinCondition source description usageGuidance",
+            "joinCondition source description usageGuidance relationshipId sourceDetail",
         )
-        left_name = token(obj.get("leftTable"), f"{path}.leftTable", LOGICAL_NAME)
-        right_name = token(obj.get("rightTable"), f"{path}.rightTable", LOGICAL_NAME)
-        left, right = tables.get(left_name), tables.get(right_name)
-        if (
-            left is None
-            or right is None
-            or left is right
-            or (left_name, right_name) in pairs
-            or obj.get("relationshipCardinality") != "MANY_TO_ONE"
-            or obj.get("joinType") != "LEFT"
-        ):
+        left = token(obj.get("leftTable"), f"{path}.leftTable", LOGICAL_NAME)
+        right = token(obj.get("rightTable"), f"{path}.rightTable", LOGICAL_NAME)
+        if left == right or left not in bindings or right not in bindings:
+            raise ValidationError(f"{path}: expected two distinct logical tables")
+        kind = (obj.get("joinType"), obj.get("relationshipCardinality"))
+        if kind not in (("LEFT", "MANY_TO_ONE"), ("RIGHT", "ONE_TO_MANY")):
             raise ValidationError(
-                f"{path}: expected one LEFT MANY_TO_ONE edge between distinct tables"
+                f"{path}: expected LEFT MANY_TO_ONE or equivalent RIGHT ONE_TO_MANY"
             )
         keys = items(obj.get("relationshipColumns"), f"{path}.relationshipColumns")
         if len(keys) != 1:
             raise ValidationError(f"{path}.relationshipColumns: expected one join key pair")
         key = record(keys[0], f"{path}.relationshipColumns", "leftColumn rightColumn")
-        lhs = left.column(key.get("leftColumn"), f"{path}.leftColumn")
-        rhs = right.column(key.get("rightColumn"), f"{path}.rightColumn")
-        if rhs != right.key or left.physical[lhs].upper() != right.physical[rhs].upper():
-            raise ValidationError(
-                f"{path}: join keys must have the same live type and target the primary key"
-            )
+        lhs, rhs = key.get("leftColumn"), key.get("rightColumn")
+        if not isinstance(lhs, str) or not isinstance(rhs, str):
+            raise ValidationError(f"{path}.relationshipColumns: expected column names")
         if "joinCondition" in obj:
             condition = scalar(obj["joinCondition"], f"{path}.joinCondition")
             operands = (condition.this, condition.expression)
@@ -413,19 +423,55 @@ def add_relationships(tables: dict[str, Table], value: Any) -> int:
                     isinstance(col, exp.Column) and not col.db and not col.catalog
                     for col in operands
                 )
-                or {(col.table, col.name) for col in operands}
-                != {(left_name, lhs), (right_name, rhs)}
+                or {(col.table, col.name) for col in operands} != {(left, lhs), (right, rhs)}
             ):
                 raise ValidationError(
                     f"{path}.joinCondition: expected exactly the declared key equality"
                 )
+        flipped = kind[0] == "RIGHT"
+        if flipped:
+            left, right, lhs, rhs = right, left, rhs, lhs
+        targets = edges.setdefault(left, set())
+        if right in targets:
+            raise ValidationError(
+                f"approvedRelationships: multiple joins from {left} to {right} require explicit role mappings"
+            )
+        targets.add(right)
+        joins.append(Join(left, right, lhs, rhs, flipped))
+
+    # MetricFlow can traverse two entity links. A repeated target would require a
+    # choice between paths (including paths that return to the source).
+    for source, direct in edges.items():
+        seen = {source}
+        pending = [(target, 1) for target in sorted(direct)]
+        while pending:
+            target, hops = pending.pop()
+            if target in seen:
+                raise ValidationError(
+                    f"approvedRelationships: cyclic or ambiguous path from {source} to {target}"
+                )
+            if hops > MAX_JOIN_HOPS:
+                raise ValidationError(
+                    f"approvedRelationships: path from {source} to {target} exceeds two hops"
+                )
+            seen.add(target)
+            pending.extend(
+                (next_target, hops + 1) for next_target in sorted(edges.get(target, set()))
+            )
+    return joins
+
+
+def add_relationships(tables: dict[str, Table], joins: list[Join]) -> None:
+    for join in joins:
+        left, right = tables[join.fact], tables[join.dimension]
+        path = f"approvedRelationships.{left.name}_to_{right.name}"
+        lhs = left.column(join.foreign_key, f"{path}.leftColumn")
+        rhs = right.column(join.target_key, f"{path}.rightColumn")
+        if rhs != right.key or left.physical[lhs].upper() != right.physical[rhs].upper():
+            raise ValidationError(
+                f"{path}: join keys must have the same live type and target the reviewed primary key"
+            )
         left.annotate(lhs, path, entity={"type": "foreign", "name": right.entity})
-        pairs.add((left_name, right_name))
-        sources.add(left_name)
-        targets.add(right_name)
-    if sources & targets:
-        raise ValidationError("approvedRelationships: multi-hop paths and cycles are unsupported")
-    return len(links)
 
 
 PREDICATES = (
@@ -630,11 +676,20 @@ def convert(
     time_mapping: dict,
     primary_keys: dict,
     totals_only: list,
+    unkeyed_models: list,
 ) -> tuple[dict[str, Table], list[str], int, int]:
     content = document["content"]
     semantic = content["semanticModel"]
     instructions = record(content.get("instructions", {}), "instructions")
     mappings, notes = time_mappings(instructions, time_mapping)
+    joins = normalized_joins(semantic.get("approvedRelationships", []), bindings)
+    unkeyed = {token(value, "unkeyed_models", LOGICAL_NAME) for value in unkeyed_models}
+    if unkeyed - bindings.keys():
+        raise ValidationError("unkeyed_models: contains a name outside logicalTables")
+    if unkeyed & {join.dimension for join in joins}:
+        raise ValidationError(
+            "unkeyed_models: approved relationship targets require a reviewed primary key"
+        )
     if entity_names.keys() - bindings.keys():
         raise ValidationError("entity_names: contains a name outside logicalTables")
     if primary_keys.keys() - bindings.keys():
@@ -657,7 +712,16 @@ def convert(
             path,
             "name baseTable description primaryKey dimensions timeDimensions usageGuidance synonyms",
         )
-        if "primaryKey" in obj:
+        if name in unkeyed:
+            if "primaryKey" in obj or name in primary_keys:
+                raise ValidationError(
+                    f"unkeyed_models.{name}: conflicts with a declared or supplied key"
+                )
+            key = None
+            notes.append(
+                f"{name}: dimensions have a namespace without a primary key or key tests."
+            )
+        elif "primaryKey" in obj:
             pk = record(obj["primaryKey"], f"{path}.primaryKey", "columns")
             keys = items(pk.get("columns"), f"{path}.primaryKey.columns")
             if len(keys) != 1:
@@ -685,27 +749,37 @@ def convert(
                 "semantic_model": {"enabled": True},
             },
         )
-        table.column(key, f"{path}.primaryKey")
         config = annotation_config(obj, path)
         if config:
             table.model["semantic_model"]["config"] = config
-        table.annotate(
-            key,
-            path,
-            entity={"type": "primary", "name": table.entity},
-            data_tests=["unique", "not_null"],
-        )
+        if name in unkeyed:
+            table.model["primary_entity"] = table.entity
+        else:
+            primary_key = table.column(key, f"{path}.primaryKey")
+            table.annotate(
+                primary_key,
+                path,
+                entity={"type": "primary", "name": table.entity},
+                data_tests=["unique", "not_null"],
+            )
         add_dimensions(table, obj, path, mappings)
         tables[name] = table
     if mappings:
         raise ValidationError(
             "time_mapping/timeConventions: references an undeclared time dimension"
         )
-    relationships = add_relationships(tables, semantic.get("approvedRelationships", []))
+    add_relationships(tables, joins)
+    right_joins = sum(join.reversed_from_right for join in joins)
+    if right_joins:
+        notes.append(
+            f"Converted {right_joins} RIGHT ONE_TO_MANY relationships to equivalent LEFT MANY_TO_ONE joins."
+        )
     filters = named(semantic.get("namedFilters", []), "namedFilters")
-    metrics = named(content.get("metricDefinitions"), "metricDefinitions")
+    metrics = named(content.get("metricDefinitions", []), "metricDefinitions")
     if not metrics:
-        raise ValidationError("metricDefinitions: at least one metric is required")
+        notes.append(
+            "The source package declares no metrics. Generated models retain its dimensions and relationships."
+        )
     for name in sorted(totals):
         table = tables[name]
         declared = [
@@ -754,5 +828,9 @@ def convert(
             "Review narrative business rules, guidance and examples in published-package.json before use."
         )
     for table in tables.values():
+        if not table.projection:
+            raise ValidationError(
+                f"logicalTables.{table.name}: no columns to project into the dbt model"
+            )
         table.model["columns"] = list(table.columns.values())
-    return tables, sorted(set(notes)), len(metrics), relationships
+    return tables, sorted(set(notes)), len(metrics), len(joins)

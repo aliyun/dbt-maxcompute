@@ -153,7 +153,7 @@ def report(
         f"Published package {identity['specName']} at revision {revision}.",
         f"Canonical JSON SHA-256 of the source snapshot is {snapshot_hash}.",
         "",
-        "| Logical model | Existing source | dbt view alias | Primary entity |",
+        "| Logical model | Existing source | dbt view alias | Entity namespace |",
         "| --- | --- | --- | --- |",
     ]
     for name, table in tables.items():
@@ -170,7 +170,7 @@ def report(
             "The importer checked the live table definitions. Run data tests and compare metric results before adopting the project.",
             "Confirm that the target schema and generated aliases are reserved for this project before building its views.",
             "The profile template requires your MaxCompute data endpoint, target project/schema and credentials via environment variables.",
-            "Primary entity names use the logical table names unless you supplied entity_names.",
+            "Entity namespaces use the logical table names unless you supplied entity_names.",
             "Use a MetricFlow build that supports MaxCompute to verify LEFT behavior and metric results.",
             "",
             *[f"- {note}" for note in notes],
@@ -200,6 +200,7 @@ def import_semantic(
     time_mapping: dict | None = None,
     primary_keys: dict | None = None,
     totals_only: list | None = None,
+    unkeyed_models: list | None = None,
 ) -> dict:
     token(name, "name")
     token(revision, "revision")
@@ -259,6 +260,7 @@ def import_semantic(
         time_mapping=record({} if time_mapping is None else time_mapping, "time_mapping"),
         primary_keys=record({} if primary_keys is None else primary_keys, "primary_keys"),
         totals_only=items([] if totals_only is None else totals_only, "totals_only"),
+        unkeyed_models=items([] if unkeyed_models is None else unkeyed_models, "unkeyed_models"),
     )
     snapshot_hash = digest(document)
     files = model_files(tables, bindings, aliases, start, end)
@@ -294,6 +296,7 @@ def import_semantic(
         "relationships": relationships,
         "entityNames": {model: table.entity for model, table in tables.items()},
         "totalsOnlyModels": [name for name, table in tables.items() if table.totals_only],
+        "unkeyedModels": [name for name, table in tables.items() if table.key is None],
         "reviewNotes": notes,
         "remoteMutations": False,
     }
