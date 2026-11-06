@@ -4,14 +4,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from dbt.adapters.maxcompute.semantic.export import MaxcClient, export_semantic
 from dbt.adapters.maxcompute.semantic.files import ValidationError, read_json
+from dbt.adapters.maxcompute.semantic.import_project import import_semantic
 
 FIXTURE = Path(__file__).parent / "fixtures/dbt_semantic_latest.json"
 
 
 class Client:
+    namespace = "123"
+
     def __init__(self):
         self.calls = []
         self.snapshot = {
@@ -29,8 +33,8 @@ class Client:
         }
         self.partitions = []
 
-    def read(self, name):
-        self.calls.append("read")
+    def read(self, name, *, revision=None):
+        self.calls.append("read" if revision is None else ("published", revision))
         return copy.deepcopy(self.snapshot)
 
     def describe(self, relation):
@@ -159,3 +163,133 @@ def test_dbt_adapter_operation_uses_project_target_and_wraps_errors(case, monkey
     assert Path(result["path"]) == project / "maxagent-semantic-proposal.json"
     with pytest.raises(DbtRuntimeError, match="already exists"):
         MaxComputeAdapter.export_semantic_package(adapter, "sales", "UTC", "LEFT")
+
+
+@pytest.fixture
+def published(case):
+    client, _, proposal = case
+    run(case)
+    client.snapshot = read_json(str(proposal))
+    client.snapshot.update(source="PUBLISHED", revisionId="published_1", object={})
+    client.calls.clear()
+    return client, proposal.parent / "imported"
+
+
+def reverse(published, **overrides):
+    client, output = published
+    args = dict(
+        revision="published_1",
+        output=str(output),
+        project_name="imported_sales",
+        table_prefix="sales_dev",
+        time_spine_start="2026-01-31",
+        time_spine_end="2026-02-04",
+    )
+    args.update(overrides)
+    return import_semantic(client, "sales", **args)
+
+
+def test_import_binds_published_tables_and_generates_reviewable_project(published):
+    client, output = published
+    result = reverse(published)
+    assert client.calls == [("published", "published_1"), "metadata", "metadata"]
+    assert result["remoteMutations"] is False
+    assert result["metrics"] == 3 and result["relationships"] == 1
+    assert any("COUNT on empty inputs" in note for note in result["reviewNotes"])
+    assert read_json(str(output / "published-package.json")) == client.snapshot
+    assert not (output / "profiles.yml").exists()
+    profile = yaml.safe_load((output / "profiles.yml.example").read_text())["imported_sales"]
+    assert "env_var" in profile["outputs"]["dev"]["access_key_secret"]
+    sources = yaml.safe_load((output / "models/sources.yml").read_text())["sources"]
+    assert sources[0]["database"] == "p" and sources[0]["schema"] == "s"
+    assert sources[0]["tables"] == [
+        {"name": "orders", "identifier": "orders"},
+        {"name": "customers", "identifier": "customers"},
+    ]
+    models = yaml.safe_load((output / "models/semantic.yml").read_text())["models"]
+    orders, customers, spine = models
+    assert orders["config"]["alias"] == "sales_dev_orders"
+    assert orders["agg_time_dimension"] == "ordered_at"
+    entities = {
+        column["name"]: column["entity"] for column in orders["columns"] if "entity" in column
+    }
+    assert entities["customer_id"] == customers["columns"][0]["entity"] | {"type": "foreign"}
+    assert orders["metrics"][0]["filter"] == "{{ Dimension('orders__status') }} = 'paid'"
+    assert orders["metrics"][2]["type"] == "ratio"
+    assert orders["metrics"][2]["denominator"] == "paid_orders"
+    assert spine["time_spine"]["standard_granularity_column"] == "date_day"
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "error"),
+    [
+        (("source",), "USER_DRAFT", "requested Published"),
+        (("revisionId",), "stale", "requested Published"),
+        (
+            ("content", "semanticModel", "approvedRelationships", 0, "joinType"),
+            "INNER",
+            "LEFT MANY_TO_ONE",
+        ),
+        (
+            ("content", "semanticModel", "approvedRelationships", 0, "joinCondition"),
+            "orders.customer_id = customers.customer_id AND customers.region = 'east'",
+            "joinCondition",
+        ),
+        (
+            ("content", "semanticModel", "namedFilters", 0, "sqlFragment"),
+            "status = '{{ env_var('secret') }}'",
+            "SQL without Jinja",
+        ),
+        (
+            ("content", "metricDefinitions", 2, "derivedMetric", "formula"),
+            "paid_revenue / paid_orders",
+            "derivedMetric.formula",
+        ),
+        (("content", "metricDefinitions", 0, "window"), "7 days", "window: unsupported field"),
+    ],
+)
+def test_import_rejects_lossy_or_executable_mappings(published, path, value, error):
+    client, output = published
+    target = client.snapshot
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    with pytest.raises(ValidationError, match=error):
+        reverse(published)
+    assert not output.exists()
+
+
+def test_import_requires_reviewed_time_mapping_for_free_text(published):
+    client, output = published
+    client.snapshot["content"]["instructions"]["timeConventions"] = ["Use UTC order days"]
+    client.snapshot["content"]["semanticModel"]["namedFilters"][0][
+        "sqlFragment"
+    ] = "orders.status = 'paid'"
+    with pytest.raises(ValidationError, match=r"time_mapping for orders.ordered_at"):
+        reverse(published)
+    assert not output.exists()
+    result = reverse(
+        published,
+        time_mapping={
+            "orders.ordered_at": {"timezone": "UTC", "granularity": "day", "default": True}
+        },
+        entity_names={"orders": "order", "customers": "customer"},
+    )
+    assert any("supplied time mapping" in note for note in result["reviewNotes"])
+    model = yaml.safe_load((output / "models/semantic.yml").read_text())["models"][0]
+    assert model["metrics"][0]["filter"] == "{{ Dimension('order__status') }} = 'paid'"
+
+
+def test_import_preserves_existing_project_and_rejects_partitioned_sources(published):
+    client, output = published
+    output.mkdir()
+    sentinel = output / "keep.txt"
+    sentinel.write_text("keep")
+    with pytest.raises(ValidationError, match="new directory"):
+        reverse(published)
+    assert list(output.iterdir()) == [sentinel]
+    assert client.calls == []
+    client.partitions = [{"name": "ds", "type": "STRING"}]
+    with pytest.raises(ValidationError, match="partitioned sources"):
+        reverse(published, output=str(output.parent / "other"))
+    assert not (output.parent / "other").exists()

@@ -165,6 +165,57 @@ class MaxComputeAdapter(SQLAdapter):
         except (ValidationError, OSError) as exc:
             raise DbtRuntimeError(str(exc)) from exc
 
+    @available.parse_none
+    def import_semantic_package(
+        self,
+        name,
+        revision,
+        output,
+        table_prefix,
+        time_spine_start,
+        time_spine_end,
+        project_name="semantic_import",
+        maxc="maxc",
+        config=None,
+        namespace=None,
+        user_agent=None,
+        entity_names=None,
+        time_mapping=None,
+    ):
+        """Generate a new dbt project from a fixed Published semantic package."""
+        from pathlib import Path
+        from dbt.adapters.maxcompute.semantic.export import MaxcClient
+        from dbt.adapters.maxcompute.semantic.files import ValidationError
+
+        try:
+            from dbt.adapters.maxcompute.semantic.import_project import import_semantic
+        except ImportError as exc:
+            raise DbtRuntimeError(
+                'Install converter dependencies with pip install "dbt-maxcompute[semantic]".'
+            ) from exc
+
+        root = Path(self.config.project_root)
+        try:
+            return import_semantic(
+                MaxcClient(
+                    maxc,
+                    root / Path(config).expanduser() if config else None,
+                    user_agent,
+                    namespace,
+                ),
+                name,
+                revision=revision,
+                output=str(root / Path(output).expanduser()),
+                project_name=project_name,
+                table_prefix=table_prefix,
+                time_spine_start=time_spine_start,
+                time_spine_end=time_spine_end,
+                entity_names=entity_names,
+                time_mapping=time_mapping,
+            )
+        except (ValidationError, OSError, TypeError) as exc:
+            raise DbtRuntimeError(str(exc)) from exc
+
     def get_odps_client(self) -> ODPS:
         conn = self.acquire_connection()
         return conn.handle.odps
