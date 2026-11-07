@@ -165,11 +165,18 @@ not a limit dbt imposes: the model's own declared `partition_by` - already the t
 whether a table is auto-partitioned at all - does reach the point where the relation is built. So
 narrowing the shift to the types it helps, or refusing the combination outright, are both implementable
 here; both also hinge on a declaration rather than on the column's physical type - and nothing
-downstream checks that declaration. Measured: an `input` column typed `timestamp_ntz` whose model
-declares `partition_by` as `timestamp` builds and runs on this branch's code, and then behaves
-exactly like the naive row above (first window writes two partitions, the second window erases the
-row the first one wrote). So a declaration-based guard protects honestly-declared models and quietly
-does nothing for a mismatched one. Either way which contract to keep is a product decision, so this
+downstream checks that declaration, and both mismatch directions were measured on this branch's code:
+
+* an `input` column typed `timestamp_ntz` whose model declares `partition_by` as `timestamp` builds and
+  runs, and loses rows exactly like the naive row above (first window writes two partitions, the second
+  window erases the row the first one wrote);
+* the reverse - a clock-sensitive `timestamp` column declared as `timestamp_ntz` - is fixed by this
+  branch's code (each window writes its own single partition, all four rows survive), and a
+  declaration-based guard would skip the shift there and hand that model back to the bug.
+
+So a declaration-based guard is not a free tightening: it protects honestly-declared naive columns and
+gives up a fix this branch delivers for a mis-declared clock-sensitive one. Either way which contract to
+keep is a product decision, so this
 pull request documents the behaviour instead of making it. Until one
 of them lands, a `microbatch` model partitioned on `timestamp_ntz` or `date` should keep `timezone`
 unset - the measurement above is why that advice is not cosmetic: for `timestamp_ntz` on a non-UTC
