@@ -429,8 +429,9 @@ dbt-core 1.11.2 + dbt-maxcompute 1.11.3b3 run on 2026-09-25 against a three-tier
 
 Two things to watch when installing these packages:
 
-* Several `packages.yml` files reference a branch (`revision: main`) instead of a tag, so a build is
-  only reproducible if you commit `package-lock.yml`; `dbt-data-reliability` has no release tag yet.
+* As of 2026-11-08, one root `packages.yml` still installs from a branch (`elementary`: revision `main`),
+  and `dbt-data-reliability` uses an open hub version range instead of a pinned tag, so a build is only
+  reproducible if you commit `package-lock.yml`; `dbt-data-reliability` has no release tag of its own.
   Pinned refs and the lock-file workflow are spelled out below (each row states the date its ref was read from the live remote).
 * dbt needs a three-tier MaxCompute project (`project.schema.table`). On a two-tier project, `dbt build`
   fails up front with `ODPS-0110061 Invalid database operations on two-tier model`.
