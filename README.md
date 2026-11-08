@@ -429,9 +429,10 @@ dbt-core 1.11.2 + dbt-maxcompute 1.11.3b3 run on 2026-09-25 against a three-tier
 
 Two things to watch when installing these packages:
 
-* Several `packages.yml` files reference a branch (`revision: main`) instead of a tag, so a build is
-  only reproducible if you commit `package-lock.yml`; `dbt-data-reliability` has no release tag yet.
-  Pinned refs and the lock-file workflow are spelled out below (checked against the live remotes on 2026-10-29).
+* As of 2026-11-08, one root `packages.yml` still installs from a branch (`elementary`: revision `main`),
+  and `dbt-data-reliability` uses an open hub version range instead of a pinned tag, so a build is only
+  reproducible if you commit `package-lock.yml`; `dbt-data-reliability` has no release tag of its own.
+  Pinned refs and the lock-file workflow are spelled out below (each row states the date its ref was read from the live remote).
 * dbt needs a three-tier MaxCompute project (`project.schema.table`). On a two-tier project, `dbt build`
   fails up front with `ODPS-0110061 Invalid database operations on two-tier model`.
 
@@ -463,16 +464,18 @@ of truth, and it is what a rebuild months later runs.
 
 | Package | `revision:` | why |
 |---|---|---|
-| [dbt-utils](https://github.com/dingxin-tech/dbt-utils) | `a8f1c6f612da282aa05655d6d3a70beccf516700` | the `1.3.0-mc.1` tag is `3463ce1e4…` while `main` is `a8f1c6f61…`; pin the sha you actually tested |
-| [dbt-date](https://github.com/dingxin-tech/dbt-date) | `0.10.1-mc.1` | tag, and it equals `main` (`80b5dca27…`) |
-| [dbt-expectations](https://github.com/dingxin-tech/dbt-expectations) | `5882c035c43d4487ca99732a40fcf31b9605cd7b` | the `0.10.4-mc.1` tag is `2c896488f…` while `main` is `5882c035c…`; pin the sha you actually tested |
-| [dbt-project-evaluator](https://github.com/dingxin-tech/dbt-project-evaluator) | `d603d32b2c25e02fc965cd31ba1f8cf7c8c81103` | the `1.0.0-mc.1` tag is `d0a400e7a…` while `main` is `d603d32b2…`; pin the sha you actually tested |
-| [elementary](https://github.com/dingxin-tech/elementary) | `0.16.4-mc.1` | tag, and it equals `main` (`684a0d21b…`) |
-| [dbt-data-reliability](https://github.com/dingxin-tech/dbt-data-reliability) | `9ec0685e6f47ba78b3c1aa574f6ab34c657a904f` | no release tag exists in this repository, so a sha is the only immutable ref |
+| [dbt-utils](https://github.com/dingxin-tech/dbt-utils) | `a8f1c6f612da282aa05655d6d3a70beccf516700` | the `1.3.0-mc.1` tag points at `3463ce1e4…`; this cell is the sha that `main` pointed at on 2026-11-05 |
+| [dbt-date](https://github.com/dingxin-tech/dbt-date) | `0.10.1-mc.1` | tag, and `main` pointed at it on 2026-11-07 |
+| [dbt-expectations](https://github.com/dingxin-tech/dbt-expectations) | `5882c035c43d4487ca99732a40fcf31b9605cd7b` | the `0.10.4-mc.1` tag points at `2c896488f…`; this cell is the sha that `main` pointed at on 2026-11-05 |
+| [dbt-project-evaluator](https://github.com/dingxin-tech/dbt-project-evaluator) | `d603d32b2c25e02fc965cd31ba1f8cf7c8c81103` | the `1.0.0-mc.1` tag points at `d0a400e7a…`; this cell is the sha that `main` pointed at on 2026-11-07 |
+| [elementary](https://github.com/dingxin-tech/elementary) | `0.16.4-mc.1` | tag, and `main` pointed at it on 2026-11-07 |
+| [dbt-data-reliability](https://github.com/dingxin-tech/dbt-data-reliability) | `9ec0685e6f47ba78b3c1aa574f6ab34c657a904f` | no release tag exists in this repository, so a sha is the only immutable ref (the sha that `master` pointed at on 2026-11-07) |
 
 If you need code that is newer than a package's tag, pin the full commit sha of the branch you
 tested rather than the branch name, and say so in your project's `packages.yml` comment: a named
-branch silently changes underneath every install.
+branch silently changes underneath every install. The dates in the table say when that ref was
+read, not what it points at today - re-check a branch tip with
+`git ls-remote --heads --tags https://github.com/dingxin-tech/<package>.git` before changing a pin.
 
 To upgrade a dependency: change the ref, `rm -rf dbt_packages package-lock.yml && dbt deps`,
 re-run `dbt build` against a three-tier project, and commit `packages.yml` together with the new
