@@ -57,10 +57,18 @@ jobs:
             echo "::error::tag '$TAG' does not look like a release tag (expected v<semver>)"
             exit 1
           fi
-          sha="$(git ls-remote "https://github.com/$REPO" "refs/tags/$TAG" | awk '{print $1}')"
-          if [ -z "$sha" ]; then
+          # 一个 tag 名在 ls-remote 里可以占两行：附注 tag 本体与它剥开后的 commit。
+          # GitHub 上确实两行都给（本地镜像在只问一种形状时只给一行），所以这里显式取两行、优先要 commit。
+          listing="$(git ls-remote "https://github.com/$REPO" "refs/tags/$TAG" "refs/tags/$TAG^{}")"
+          if [ -z "$listing" ]; then
             echo "::error::tag '$TAG' is not in this repository"
             exit 1
+          fi
+          sha="$(printf '%s\n' "$listing" | awk '$2 ~ /\^\{\}$/ {print $1; exit}')"
+          peeled=yes
+          if [ -z "$sha" ]; then
+            sha="$(printf '%s\n' "$listing" | awk '{print $1; exit}')"
+            peeled=no
           fi
           version="${TAG#v}"
           prerelease=false
@@ -70,14 +78,20 @@ jobs:
           {
             echo "## publishing"
             echo ""
-            echo "- tag: \`$TAG\` -> \`$sha\`"
+            echo "- tag: \`$TAG\` -> \`$sha\` (peeled: \`$peeled\`)"
             echo "- version: \`$version\`"
             echo "- prerelease: \`$prerelease\`"
             echo "- PyPI project: dbt-maxcompute"
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$peeled" != "yes" ] && [ "$(printf '%s\n' "$listing" | wc -l)" -gt 1 ]; then
+            echo "::error::cannot resolve a single commit for '$TAG' from the ls-remote listing"
+            exit 1
+          fi
           {
             echo "version=$version"
             echo "sha=$sha"
+            echo "tag=$TAG"
+            echo "peeled=$peeled"
             echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
 
@@ -92,7 +106,7 @@ jobs:
       - name: Check out the tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.preflight.outputs.sha }}
+          ref: ${{ inputs.tag }}
           persist-credentials: false
 
       - name: Set up Python
@@ -155,7 +169,7 @@ jobs:
       - name: Check out the tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.preflight.outputs.sha }}
+          ref: ${{ inputs.tag }}
           fetch-depth: 0  # Fetch all history for version detection
 
       - name: Set up Python
@@ -224,7 +238,7 @@ jobs:
       - name: Check out the tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.preflight.outputs.sha }}
+          ref: ${{ inputs.tag }}
           fetch-depth: 0
 
       - uses: actions/download-artifact@v4
@@ -235,16 +249,18 @@ jobs:
       - name: Generate release notes
         id: release_notes
         env:
-          SHA: ${{ needs.preflight.outputs.sha }}
+          TAG: ${{ inputs.tag }}
         run: |
           set -uo pipefail
-          PREV_TAG=$(git describe --tags --abbrev=0 "$SHA^" 2>/dev/null || echo "")
+          # 用 tag 名加 ^ 取它指向的提交：附注与轻量 tag 都成立（附注 tag 对象本身没有父提交）
+          target="$(git rev-list -n 1 "$TAG^" 2>/dev/null || echo "")"   # 首个 release 时没有父提交，这里取空并按 Initial Release 走
+          PREV_TAG=$(git describe --tags --abbrev=0 "$target" 2>/dev/null || echo "")
           {
             echo "RELEASE_NOTES<<EOF"
             if [ -n "$PREV_TAG" ]; then
               echo "## Changes since $PREV_TAG"
               echo ""
-              git log "$PREV_TAG..$SHA" --oneline --pretty=format:"- %s (%h)"
+              git log "$PREV_TAG..$target" --oneline --pretty=format:"- %s (%h)"
             else
               echo "## Initial Release"
               echo ""
@@ -258,7 +274,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
-          target_commitish: ${{ needs.preflight.outputs.sha }}
           name: ${{ needs.preflight.outputs.version }}
           body: ${{ steps.release_notes.outputs.RELEASE_NOTES }}
           files: dist/*
