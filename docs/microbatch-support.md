@@ -177,6 +177,11 @@ Three details of that rule are the substance, not footnotes:
   `timestamp`: the physical answer leaves the window on UTC and nothing is lost - trusting the
   declaration would have shifted it and erased a neighbour's partition. A guard that read the
   declaration would have been wrong in both directions, which is why it is only a fallback (below).
+* **An ephemeral model in between is that fallback's real shape.** `ref()`ing an ephemeral model
+  puts a CTE name where a relation would be, so there is nothing to describe: the declared type is
+  used, and if nothing declares the column either the batch is refused on a moved session (the
+  message says so) rather than guessed. Materialise the intermediate model, or declare its event
+  column, and the window is decided from the column again.
 * **When the warehouse cannot be asked, the declaration is used and said to be unverified.** A
   relation that does not exist yet (`dbt compile` against a target schema where the upstream has
   not been built) or a connection that cannot describe it yields no physical answer; the node's

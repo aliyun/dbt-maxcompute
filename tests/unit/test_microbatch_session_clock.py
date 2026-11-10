@@ -345,6 +345,45 @@ class TestWhichTypeDecidesTheClock:
             "2025-05-01 00:00:00", "2025-05-02 00:00:00", field="`Event Time`"
         )
 
+    def test_an_ephemeral_upstream_falls_to_the_declaration_or_refuses(self, session_clock):
+        """A CTE has no relation to describe, so the physical answer cannot be read at all.
+
+        `ref()`ing an ephemeral model between the event column and the microbatch model is the one
+        shape where the warehouse cannot answer even though the run is healthy. The declared type is
+        then the only signal and is used as such (logged unverified); with no declaration either, the
+        window is refused on a moved session rather than guessed - the message tells the user to
+        materialise the upstream or declare the column.
+        """
+        from dbt.adapters.maxcompute.relation import declared_event_field_type
+
+        class _Node:
+            identifier = "stg_events"
+            config = type("C", (), {"event_time": "event_time"})()
+            columns = {
+                "event_time": type("Col", (), {"name": "event_time", "data_type": "timestamp"})()
+            }
+
+        class _BareNode(_Node):
+            columns = {}
+
+        assert declared_event_field_type(_Node(), "event_time") == "timestamp"
+        assert declared_event_field_type(_BareNode(), "event_time") is None
+
+        options.local_timezone = "Asia/Shanghai"
+        relation = MaxComputeRelation.create(
+            identifier="__dbt__cte__stg_events", event_field_declared_type="timestamp"
+        )
+        with _warehouse_types({}):  # nothing to describe: an ephemeral CTE
+            assert relation._render_event_time_filtered(
+                EventTimeFilter(field_name="event_time", start=UTC_DAY_START, end=UTC_DAY_END)
+            ) == _window("2025-05-01 08:00:00", "2025-05-02 08:00:00")
+            bare = MaxComputeRelation.create(identifier="__dbt__cte__stg_events")
+            with pytest.raises(DbtRuntimeError) as refused:
+                bare._render_event_time_filtered(
+                    EventTimeFilter(field_name="event_time", start=UTC_DAY_START, end=UTC_DAY_END)
+                )
+        assert "could not be read" in str(refused.value)
+
     def test_the_type_answer_is_read_once_per_relation_per_invocation(self, session_clock):
         """One metadata call per distinct relation, not one per batch boundary or per render.
 
