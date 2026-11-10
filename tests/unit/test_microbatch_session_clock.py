@@ -19,14 +19,18 @@ The cases are picked to fail for the reasons this class of bug actually happens:
   integration suite still pins in that case.
 """
 
+from contextlib import contextmanager
 from datetime import datetime
+from unittest import mock
 
 import pytest
 import pytz
 from dbt.adapters.base.relation import EventTimeFilter
+from dbt_common.exceptions import DbtRuntimeError
 from odps import options
 
-from dbt.adapters.maxcompute.relation import MaxComputeRelation
+from dbt.adapters.maxcompute import relation as relation_module
+from dbt.adapters.maxcompute.relation import MaxComputeRelation, _unquoted_field_name
 
 UTC_DAY_START = datetime(2025, 5, 1, 0, 0, 0, tzinfo=pytz.UTC)
 UTC_DAY_END = datetime(2025, 5, 2, 0, 0, 0, tzinfo=pytz.UTC)
@@ -45,11 +49,35 @@ def session_clock():
     options.local_timezone = saved
 
 
-def _render(start=UTC_DAY_START, end=UTC_DAY_END, field="event_time"):
-    relation = MaxComputeRelation.create(identifier="microbatch_model")
-    return relation._render_event_time_filtered(
-        EventTimeFilter(field_name=field, start=start, end=end)
+@contextmanager
+def _warehouse_types(types):
+    """State what the warehouse would answer for this relation's columns.
+
+    The unit cases here are about which clock a boundary is stated on *given* a type, so the
+    lookup is pinned instead of reaching for a server. `types={}` is the honest way to say
+    "cannot be read" (a relation that does not exist yet, a connection that cannot describe it);
+    the real `ref()` / `source()` path, where the answer comes from the warehouse, is pinned in
+    `tests/functional/adapter/incremental/test_microbatch_partition_timezone.py`.
+    """
+    with mock.patch.object(relation_module, "physical_column_types", lambda relation: dict(types)):
+        yield
+
+
+def _render(
+    start=UTC_DAY_START,
+    end=UTC_DAY_END,
+    field="event_time",
+    column_type="timestamp",
+    declared_type=None,
+):
+    types = {} if column_type is None else {_unquoted_field_name(field): column_type}
+    relation = MaxComputeRelation.create(
+        identifier="microbatch_model", event_field_declared_type=declared_type
     )
+    with _warehouse_types(types):
+        return relation._render_event_time_filtered(
+            EventTimeFilter(field_name=field, start=start, end=end)
+        )
 
 
 def _window(start_text, end_text, field="event_time"):
@@ -111,9 +139,10 @@ class TestShiftedSessions:
                 field_name="event_time", start=UTC_DAY_START, end=UTC_DAY_END
             ),
         )
-        assert _window(
-            "2025-05-01 08:00:00", "2025-05-02 08:00:00"
-        ) in relation.render_event_time_filtered("`microbatch_model`")
+        with _warehouse_types({"event_time": "timestamp"}):
+            assert _window(
+                "2025-05-01 08:00:00", "2025-05-02 08:00:00"
+            ) in relation.render_event_time_filtered("`microbatch_model`")
 
 
 class TestUtcSessionsAreNotMoved:
@@ -153,60 +182,209 @@ class TestSessionsThatCannotBeStatedKeepDbtsRendering:
         assert "+00:00" in _render()
 
 
-class TestDSTFoldWindowIsMadeVisible:
-    """A fold hour cannot be stated as a half-open wall-clock window; the batch must say so.
+class TestDSTFoldWindowIsRefused:
+    """A fold hour cannot be stated as a half-open wall-clock window, so the batch is refused.
 
     Measured on a real project (2025-11-02, a session that pinned `America/New_York`): the UTC
     boundary 05:00Z and the boundary 06:00Z are both ``01:00:00`` on that wall clock, the server
-    resolves ``01:00:00`` to the earlier instant, and the 05:00Z batch therefore renders as an
-    empty window. Writing nothing is the safe half of this - the next batch covers both hours -
-    but a batch that silently writes nothing is the shape of the original bug, so it is logged.
+    resolves ``01:00:00`` to the earlier instant, and the 05:00Z batch selects nothing. Writing that
+    anyway is a batch that changes no rows and reports success, and whether the folded hour is
+    covered by a neighbour depends on the zone - so a warning was not enough: no statement is
+    submitted at all.
     """
 
-    def test_the_fold_hour_renders_an_empty_window_and_warns(self, session_clock, monkeypatch):
-        from dbt.adapters.maxcompute import relation as relation_module
+    def test_the_fold_hour_is_refused_before_anything_is_written(self, session_clock):
+        options.local_timezone = "America/New_York"
+        with pytest.raises(DbtRuntimeError) as refused:
+            _render(
+                start=datetime(2025, 11, 2, 5, tzinfo=pytz.UTC),
+                end=datetime(2025, 11, 2, 6, tzinfo=pytz.UTC),
+            )
+        message = str(refused.value)
+        assert "2025-11-02 01:00:00" in message
+        assert "refuses to write" in message
+        assert "fixed-offset" in message
 
-        seen = []
-        monkeypatch.setattr(
-            relation_module.logger, "warning", lambda message: seen.append(message)
-        )
+    def test_the_other_zones_fold_collapses_the_same_way(self, session_clock):
+        """Sydney's fold repeats a *different* local hour, and is refused the same way.
+
+        Which side of the fold the server resolves the repeated text to differs by zone (measured:
+        New York takes the earlier instant, Sydney the later one), so the refusal is the half of
+        this behaviour that is stateable without a server - and it is the half that matters,
+        because the batch is not submitted in either zone.
+        """
+        options.local_timezone = "Australia/Sydney"
+        with pytest.raises(DbtRuntimeError) as refused:
+            _render(
+                start=datetime(2025, 4, 5, 15, tzinfo=pytz.UTC),
+                end=datetime(2025, 4, 5, 16, tzinfo=pytz.UTC),
+            )
+        assert "2025-04-06 02:00:00" in str(refused.value)
+
+    def test_a_naive_field_is_not_refused_on_a_fold_day(self, session_clock):
+        """The fold only collapses text that was moved: a naive field is stated on UTC either way.
+
+        This is the case a blanket "a non-UTC session is unsafe" rule would have failed - here the
+        two boundaries stay distinct texts and both batches write their own rows.
+        """
         options.local_timezone = "America/New_York"
         assert _render(
             start=datetime(2025, 11, 2, 5, tzinfo=pytz.UTC),
             end=datetime(2025, 11, 2, 6, tzinfo=pytz.UTC),
-        ) == _window("2025-11-02 01:00:00", "2025-11-02 01:00:00")
-        assert len(seen) == 1 and "selects no rows" in seen[0]
+            column_type="timestamp_ntz",
+        ) == _window("2025-11-02 05:00:00", "2025-11-02 06:00:00")
 
-    def test_the_other_zones_fold_collapses_the_same_way(self, session_clock, monkeypatch):
-        """Sydney's fold repeats a *different* local hour, and collapses the same way.
-
-        Which side of the fold the server resolves the repeated text to differs by zone (measured:
-        New York takes the earlier instant, Sydney the later one), so only the empty-window half of
-        this behaviour is stateable without a server - which is also the half the warning covers.
-        """
-        from dbt.adapters.maxcompute import relation as relation_module
-
-        seen = []
-        monkeypatch.setattr(
-            relation_module.logger, "warning", lambda message: seen.append(message)
-        )
-        options.local_timezone = "Australia/Sydney"
-        assert _render(
-            start=datetime(2025, 4, 5, 15, tzinfo=pytz.UTC),
-            end=datetime(2025, 4, 5, 16, tzinfo=pytz.UTC),
-        ) == _window("2025-04-06 02:00:00", "2025-04-06 02:00:00")
-        assert len(seen) == 1 and "Australia/Sydney" in seen[0]
-
-    def test_a_normal_hour_does_not_warn(self, session_clock, monkeypatch):
-        from dbt.adapters.maxcompute import relation as relation_module
-
-        seen = []
-        monkeypatch.setattr(
-            relation_module.logger, "warning", lambda message: seen.append(message)
-        )
+    def test_a_normal_hour_is_not_refused(self, session_clock):
         options.local_timezone = "America/New_York"
-        _render(
+        assert _render(
             start=datetime(2025, 11, 2, 7, tzinfo=pytz.UTC),
             end=datetime(2025, 11, 2, 8, tzinfo=pytz.UTC),
+        ) == _window("2025-11-02 02:00:00", "2025-11-02 03:00:00")
+
+
+class TestWhichTypeDecidesTheClock:
+    """The field's own physical type on the relation being read is the authority.
+
+    Measured on the real `ref()` path (see `docs/microbatch-support.md`): dbt-core hands the
+    adapter only a field name and two UTC instants - no type - while the upstream *node* is passed
+    to `create_from`, which is where a declaration can be picked up. The warehouse answer wins
+    because it is what the server will compare on; a YAML declaration is used only when that answer
+    is unavailable, and neither answer on a moved session is a refusal, not a coin toss.
+    """
+
+    def test_aliases_and_spelling_variants_are_the_same_type(self):
+        from dbt.adapters.maxcompute.relation import clock_kind_of
+
+        for raw in ("TIMESTAMP", " timestamp ", "DATETIME"):
+            assert clock_kind_of(raw) == "instant", raw
+        for raw in ("TIMESTAMP_NTZ", "timestamp-ntz", "timestamp ntz"):
+            assert clock_kind_of(raw) == "naive", raw
+        for raw in ("date", "string", "bigint", "", None):
+            assert clock_kind_of(raw) == "unknown", raw
+
+    @pytest.mark.parametrize("column_type", ["timestamp", "datetime"])
+    def test_clock_bearing_fields_get_the_session_reading(self, column_type, session_clock):
+        options.local_timezone = "Asia/Shanghai"
+        assert _render(column_type=column_type) == _window(
+            "2025-05-01 08:00:00", "2025-05-02 08:00:00"
         )
-        assert seen == []
+
+    @pytest.mark.parametrize("column_type", ["timestamp_ntz", "TIMESTAMP_NTZ"])
+    def test_naive_fields_keep_the_utc_reading(self, column_type, session_clock):
+        """The shift is what loses rows for a field with no clock - so it is not applied to one."""
+        options.local_timezone = "Asia/Shanghai"
+        assert _render(column_type=column_type) == _window(
+            "2025-05-01 00:00:00", "2025-05-02 00:00:00"
+        )
+
+    def test_naive_fields_still_lose_the_offset_suffix(self, session_clock):
+        """No shift is not the same as no change: dbt-core's `+00:00` text still cannot be used."""
+        options.local_timezone = "Asia/Shanghai"
+        text = _render(column_type="timestamp_ntz")
+        assert "+00:00" not in text
+        assert text == _window("2025-05-01 00:00:00", "2025-05-02 00:00:00")
+
+    def test_a_negative_offset_session_moves_naive_fields_nothing_at_all(self, session_clock):
+        options.local_timezone = "America/New_York"
+        assert _render(column_type="timestamp_ntz") == _window(
+            "2025-05-01 00:00:00", "2025-05-02 00:00:00"
+        )
+
+    def test_the_declaration_is_used_only_when_the_warehouse_cannot_answer(self, session_clock):
+        """Physical `timestamp` declared `timestamp_ntz` gets the shift: the warehouse outranks YAML.
+
+        Measured pair on the real path - an upstream column that is physically `timestamp` declared
+        `timestamp_ntz` in its property file, on a Shanghai session. Trusting the declaration would
+        have skipped the shift and reproduced the row loss this branch exists to fix.
+        """
+        options.local_timezone = "Asia/Shanghai"
+        assert _render(column_type="timestamp", declared_type="timestamp_ntz") == _window(
+            "2025-05-01 08:00:00", "2025-05-02 08:00:00"
+        )
+        assert _render(column_type=None, declared_type="timestamp_ntz") == _window(
+            "2025-05-01 00:00:00", "2025-05-02 00:00:00"
+        )
+        assert _render(column_type=None, declared_type="timestamp") == _window(
+            "2025-05-01 08:00:00", "2025-05-02 08:00:00"
+        )
+
+    def test_an_unverifiable_field_is_refused_on_a_session_that_would_move_it(self, session_clock):
+        options.local_timezone = "Asia/Shanghai"
+        with pytest.raises(DbtRuntimeError) as refused:
+            _render(column_type=None, declared_type=None)
+        message = str(refused.value)
+        assert "could not be read" in message
+        assert "Asia/Shanghai" in message
+        assert "guessed" in message
+
+    def test_the_same_unverifiable_field_is_fine_on_a_utc_session(self, session_clock):
+        """Nothing is being chosen on a UTC session: both readings are the same text, so no refusal."""
+        options.local_timezone = False
+        assert _render(column_type=None, declared_type=None) == _window(
+            "2025-05-01 00:00:00", "2025-05-02 00:00:00"
+        )
+
+    def test_a_date_field_is_refused_instead_of_comparing_to_null_forever(self, session_clock):
+        """`date` event columns cannot answer the clock question either.
+
+        Comparing a `DATE` with a timestamp string yields NULL on MaxCompute, so no row falls in
+        any window - a separate limitation, scoped out here; what changed is that it is no longer
+        silent.
+
+        Before this change, a `date` field on a shifted session produced a window that matched
+        nothing and reported success.
+        """
+        options.local_timezone = "Asia/Shanghai"
+        with pytest.raises(DbtRuntimeError) as refused:
+            _render(column_type="date")
+        assert "date" in str(refused.value)
+
+    def test_a_quoted_field_name_is_matched_against_the_warehouse_answer(self, session_clock):
+        options.local_timezone = "Asia/Shanghai"
+        assert _render(field="`Event Time`", column_type="timestamp_ntz") == _window(
+            "2025-05-01 00:00:00", "2025-05-02 00:00:00", field="`Event Time`"
+        )
+
+    def test_the_type_answer_is_read_once_per_relation_per_invocation(self, session_clock):
+        """One metadata call per distinct relation, not one per batch boundary or per render.
+
+        The window is decided twice per batch (both boundaries) and a run has many batches, while a
+        column type cannot change underneath a run that is already in flight.
+        """
+        asked = []
+
+        class _Columns:
+            def __init__(self, name, dtype):
+                self.column, self.dtype = name, dtype
+
+        class _StubAdapter:
+            def get_columns_in_relation(self, relation):
+                asked.append(relation.identifier)
+                return [_Columns("event_time", "timestamp")]
+
+        class _StubFactory:
+            @staticmethod
+            def get_adapter_by_type(name):
+                assert name == "maxcompute"
+                return _StubAdapter()
+
+        options.local_timezone = "Asia/Shanghai"
+        relation_module._PHYSICAL_TYPE_CACHE.clear()
+        relation = MaxComputeRelation.create(database="proj", schema="sch", identifier="up_stream")
+        with mock.patch.dict("sys.modules", {"dbt.adapters.factory": _StubFactory}):
+            for index in range(3):
+                relation._render_event_time_filtered(
+                    EventTimeFilter(
+                        field_name="event_time",
+                        start=datetime(2025, 5, 1 + index, tzinfo=pytz.UTC),
+                        end=datetime(2025, 5, 2 + index, tzinfo=pytz.UTC),
+                    )
+                )
+            other = MaxComputeRelation.create(
+                database="proj", schema="sch", identifier="other_stream"
+            )
+            other._render_event_time_filtered(
+                EventTimeFilter(field_name="event_time", start=UTC_DAY_START, end=UTC_DAY_END)
+            )
+        assert asked == ["up_stream", "other_stream"], asked
+        relation_module._PHYSICAL_TYPE_CACHE.clear()

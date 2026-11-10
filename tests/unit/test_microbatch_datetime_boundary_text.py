@@ -15,13 +15,16 @@ session clocks, and the model end to end - are in
 in ``docs/microbatch-support.md``.
 """
 
+from contextlib import contextmanager
 from datetime import datetime
+from unittest import mock
 
 import pytest
 import pytz
 from dbt.adapters.base.relation import EventTimeFilter
 from odps import options
 
+from dbt.adapters.maxcompute import relation as relation_module
 from dbt.adapters.maxcompute.relation import MaxComputeRelation
 
 UTC_DAY_START = datetime(2025, 5, 1, 0, 0, 0, tzinfo=pytz.UTC)
@@ -37,11 +40,26 @@ def session_clock():
     options.local_timezone = saved
 
 
-def _render(start=UTC_DAY_START, end=UTC_DAY_END, field="event_time"):
+@contextmanager
+def _warehouse_types(types):
+    """Pin the type answer so this file can stay about the *text*, not the lookup.
+
+    Most cases here run on a UTC session, where nothing is moved and no type is consulted; the few
+    that pin a real offset get the instant-bearing type, which is the one the shift exists for. The
+    type contract itself (naive fields, unreadable relations, YAML declarations) is pinned in
+    `test_microbatch_session_clock.py`, and the real `ref()` path in the functional suite.
+    """
+    with mock.patch.object(relation_module, "physical_column_types", lambda relation: dict(types)):
+        yield
+
+
+def _render(start=UTC_DAY_START, end=UTC_DAY_END, field="event_time", column_type="timestamp"):
     relation = MaxComputeRelation.create(identifier="microbatch_model")
-    return relation._render_event_time_filtered(
-        EventTimeFilter(field_name=field, start=start, end=end)
-    )
+    types = {} if column_type is None else {field.replace("`", "").lower(): column_type}
+    with _warehouse_types(types):
+        return relation._render_event_time_filtered(
+            EventTimeFilter(field_name=field, start=start, end=end)
+        )
 
 
 def _dbt_core_text(start=UTC_DAY_START, end=UTC_DAY_END, field="event_time"):

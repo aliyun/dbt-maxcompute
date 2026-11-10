@@ -126,9 +126,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hours into its neighbour's partition and the later `insert overwrite` erased
   rows the earlier batch had written - with the run reporting success. The
   boundary is now stated as the session's own reading of the same instant, so
-  the window and the partition key are cut by one clock; where this cannot state
-  the session clock (nothing pinned, a value that is not a zone name, or a name
-  the host cannot resolve) the window is left exactly as dbt-core rendered it.
+  the window and the partition key are cut by one clock - for the event columns
+  that have a clock at all. The rest of the rule, and the two behaviour changes
+  it carries:
+  * a `timestamp_ntz` event column is compared as written, so its window stays
+    on the UTC reading; shifting it would move rows into the neighbouring
+    batch and give such a model the very failure this fixes (measured end to
+    end before narrowing the rule);
+  * the type used is the column's **physical** type on the relation being read,
+    not the type a YAML property declares - measured both ways, a declaration
+    that disagrees with the column picks the wrong clock in both directions.
+    The declaration is a fallback for when the warehouse cannot be asked;
+  * on a non-UTC session, a batch whose window cannot be stated on a verifiable
+    type now fails instead of guessing, as does a batch whose two boundaries
+    collapse to the same wall clock inside a daylight-saving fold - both used to
+    select no rows and report success. `date` event columns fall in the first
+    group: still a separate limitation, but no longer a silent one.
+  Where this cannot state the session clock at all (nothing pinned, a value that
+  is not a zone name, or a name the host cannot resolve) the window is left
+  exactly as dbt-core rendered it.
 
 ## [1.11.3b3] — 2026-08-26
 

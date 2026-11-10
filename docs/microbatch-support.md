@@ -132,13 +132,14 @@ correcting. A profile that *does* set `timezone` used to move one clock and not 
 window reached into its neighbour's partition, and the later `insert overwrite` erased rows the
 earlier window had written, while the run reported success.
 
-`session_boundary_text` (used by `MaxComputeRelation._render_event_time_filtered`) now states each
-boundary in the session's own reading of the same UTC instant - `2025-05-01 00:00:00+00:00` becomes
-`'2025-05-01 08:00:00'` under `timezone: Asia/Shanghai` - which the server parses back into that
-instant, so the window and the partition key are cut by the same clock. The same call also drops the
-offset suffix, so this is one rule, not two: state the instant the way this session will read it
-back, and the text is both on the right clock and in a shape every time type can compare. Two
-properties of that rendering are deliberate:
+`MaxComputeRelation._render_event_time_filtered` states each boundary in the session's own reading
+of the same UTC instant - `2025-05-01 00:00:00+00:00` becomes `'2025-05-01 08:00:00'` under
+`timezone: Asia/Shanghai` - which the server parses back into that instant, so the window and the
+partition key are cut by the same clock. **That restatement is applied to the column types that have
+a clock to restate against**: a `timestamp_ntz` field's boundaries stay on the UTC reading (see
+"Which column type decides" below), because moving a naive value's window is what puts rows into
+their neighbour's batch. The same call drops the offset suffix for every type, so the suffix fix is
+one rule, not a branch. Two properties of that rendering are deliberate:
 
 * on a UTC session the two readings are the *same text*, so this shift moves nothing there - that
   path had already changed once, when the offset suffix was dropped (#40), and it changes again only
@@ -150,38 +151,54 @@ properties of that rendering are deliberate:
   with a function call in the predicate, and whether the optimizer still prunes the source with a
   non-constant boundary has not been measured here.
 
-### Which event-time types this aligns, and which it cannot
+### Which column type decides, and what happens when it cannot be read
 
-| `partition_by.data_type` | window vs partition with a non-UTC `timezone` |
-| --- | --- |
-| `timestamp`, `datetime` | aligned - the shift is derived from the session clock |
-| `timestamp_ntz` | **worse, not merely unaligned** - a naive column has no clock, so shifting its boundary moves rows that today land inside their own batch into the neighbouring batch's window. Measured end to end (day batches, `timezone: Asia/Shanghai`, four rows at 01:00 and 23:00 UTC on two days): the first window writes *two* partitions, the second window's `insert overwrite` then erases the row the first one wrote, and replaying the first window erases one of the second's. The same model on `master`, where the window is not shifted, loses nothing - its batches simply follow the naive local day (measured 2026-10-20) |
-| `date` | unusable either way - comparing a `DATE` with a timestamp string yields `NULL`, so no row falls in any window (measured) |
+The event-time filter dbt-core hands the adapter carries a field name and two UTC instants - no
+type. The relation that filter is rendered on, though, is the *upstream* one, and dbt-core builds it
+from the upstream node: every `ref()` / `source()` path passes that node to
+`Relation.create_from` (`dbt/context/providers.py`), and the adapter can ask the warehouse what the
+relation's own columns are. So the type question is answerable here, and this pull request answers
+it. Measured on the real `ref()` path with `timezone: Asia/Shanghai`:
 
-The window is rendered from an event-time filter that carries a field name and two instants - no
-column type - and the relation it is rendered on is not given one either, which is why these three
-cases are indistinguishable today where the boundary is written. That is this adapter's construction,
-not a limit dbt imposes: the model's own declared `partition_by` - already the thing that decides
-whether a table is auto-partitioned at all - does reach the point where the relation is built. So
-narrowing the shift to the types it helps, or refusing the combination outright, are both implementable
-here; both also hinge on a declaration rather than on the column's physical type - and nothing
-downstream checks that declaration, and both mismatch directions were measured on this branch's code:
+| physical type of the event field on the relation being read | what the window does | why |
+| --- | --- | --- |
+| `timestamp` | shifted to the session's reading of the instant | the server parses the text on the session clock, and `trunc_time()` cuts UTC |
+| `datetime` | shifted | same; it also refuses the offset suffix, which the same rendering drops |
+| `timestamp_ntz` | **left on the UTC reading** (suffix still dropped) | a naive value has no clock to move; shifting it is what turned "loses nothing today" into "loses rows" |
+| `date`, an unknown type, or a column whose type cannot be read | **the batch is refused** on a session that would move the text; on a UTC session nothing is moved, so nothing is refused | both readings cannot be right, and choosing one silently picks which rows a neighbour's `insert overwrite` erases |
 
-* an `input` column typed `timestamp_ntz` whose model declares `partition_by` as `timestamp` builds and
-  runs, and loses rows exactly like the naive row above (first window writes two partitions, the second
-  window erases the row the first one wrote);
-* the reverse - a clock-sensitive `timestamp` column declared as `timestamp_ntz` - is fixed by this
-  branch's code (each window writes its own single partition, all four rows survive), and a
-  declaration-based guard would skip the shift there and hand that model back to the bug.
+Three details of that rule are the substance, not footnotes:
 
-So a declaration-based guard is not a free tightening: it protects honestly-declared naive columns and
-gives up a fix this branch delivers for a mis-declared clock-sensitive one. Either way which contract to
-keep is a product decision, so this
-pull request documents the behaviour instead of making it. Until one
-of them lands, a `microbatch` model partitioned on `timestamp_ntz` or `date` should keep `timezone`
-unset - the measurement above is why that advice is not cosmetic: for `timestamp_ntz` on a non-UTC
-session the shift is not a no-op, it takes a combination that drops no rows today and gives it the
-very failure this pull request fixes.
+* **The column's physical type is the authority, not the YAML declaration.** Both mismatch
+  directions were measured on the real path, on a Shanghai session. An upstream column physically
+  `timestamp` declared `timestamp_ntz` in its property file: the physical answer shifts the window
+  and all four rows survive in two partitions - trusting the declaration would have skipped the
+  shift and reproduced the silent overwrite. The reverse, physically `timestamp_ntz` declared
+  `timestamp`: the physical answer leaves the window on UTC and nothing is lost - trusting the
+  declaration would have shifted it and erased a neighbour's partition. A guard that read the
+  declaration would have been wrong in both directions, which is why it is only a fallback (below).
+* **When the warehouse cannot be asked, the declaration is used and said to be unverified.** A
+  relation that does not exist yet (`dbt compile` against a target schema where the upstream has
+  not been built) or a connection that cannot describe it yields no physical answer; the node's
+  declared type is then used, with a debug line saying it was not verified against the column. If
+  neither answers on a session that would move the text, the run **raises** rather than guessing,
+  and the message names the relation, the boundary, the session timezone and the two ways to make
+  the type verifiable.
+* **Type names are normalised before the decision** - case-insensitive, separators dropped, so
+  `TIMESTAMP_NTZ`, `timestamp-ntz` and `timestamp_ntz` land in the same branch. A spelling this
+  version does not recognise is `unknown` (refused on a moved session), not silently naive.
+
+Two costs, stated as costs. Models on a non-UTC session whose event column is `date`, an unrecognised
+type, or unverifiable now **fail** where they previously ran: for `date` that run selected no rows in
+any window and reported success (a separate limitation, still out of scope here - what changed is
+that it is no longer silent), and for a naive column with no readable type the run used to pick the
+shifted reading by default. And deciding the clock costs one metadata call per distinct relation per
+invocation, cached rather than repeated per batch boundary.
+
+On the adapter's default profile - no `timezone` in the profile, so the session runs on UTC - the two
+readings are the same text: nothing is moved, no clock has to be consulted, and no type lookup
+happens at all. That path is unchanged, and it is what the `TestMicrobatchDefaultUtcSession` cell
+pins.
 
 If the profile's `timezone` cannot be resolved on the host running dbt, the window is left as
 dbt-core rendered it and a warning is logged: a guessed shift is worse than the known behaviour.
@@ -190,11 +207,11 @@ A `set odps.sql.timezone=...;` written inside a model does **not** move the cloc
 stated on, so it cannot be used to work around a wrong `timezone`. The adapter turns leading `set`
 statements into per-statement hints, and measured on a real project in both directions - profile on
 UTC with a statement asking for `Asia/Shanghai`, and the reverse - the value pyodps submits from the
-profile wins: the session parses timestamp strings with it, and `session_boundary_text` shifts the
-window with the same value. The two therefore cannot drift apart. What a statement-level override
-loses is its own effect on timestamp parsing, which is a separate question from this strategy. (A
-statement-level value does apply when nothing is pinned globally; this adapter always pins the
-profile's value, including `Etc/GMT` for an unset `timezone`.)
+profile wins: the session parses timestamp strings with it, and the window is shifted with the same
+value. The two therefore cannot drift apart. What a statement-level override loses is its own effect
+on timestamp parsing, which is a separate question from this strategy. (A statement-level value does
+apply when nothing is pinned globally; this adapter always pins the profile's value, including
+`Etc/GMT` for an unset `timezone`.)
 
 ### The one thing a wall clock cannot state: the fold hour
 
@@ -217,12 +234,16 @@ the text resolves to the **later** instant: the earlier batch's window is empty 
 **earlier** instant, so the following batch covers both hours and nothing is lost.
 
 So at a fold, `batch_size: hour` in a DST-observing session either double-covers or drops that one
-hour, depending on the zone. Not row loss on the scale the offset misalignment caused, and not
-silent: the adapter logs a warning whenever a window's two ends render to the same wall clock, which
-is exactly that batch. The clean answer is a session without repeated hours - leave `timezone`
-unset (UTC) or pin a fixed-offset zone - and day-granularity batches avoid the case entirely in the
-zones measured here, where a UTC midnight boundary is 20:00/19:00 in New York and midnight in
-Sydney, never the folded hour.
+hour, depending on the zone - and "depending on the zone" is not something a batch should leave to
+chance. This is why the batch is **refused** rather than warned about: a warning still submits an
+`insert overwrite` that selects no rows and reports success, which is the same shape as the bug this
+page documents. The run raises, naming the wall clock both ends collapsed to and the ways out -
+leave `timezone` unset (UTC), pin a fixed-offset zone, or use a coarser `batch_size`. Day-granularity
+batches never hit it in the zones measured here, where a UTC midnight boundary is 20:00/19:00 in New
+York and midnight in Sydney, never the folded hour. A naive (`timestamp_ntz`) field is not refused on
+a fold day at all: its two boundaries stay on the UTC reading, so they remain two distinct texts -
+which is the case a blanket "a non-UTC session is unsafe" rule would have failed.
+
 
 ## Not verified here
 
@@ -239,9 +260,19 @@ Sydney, never the folded hour.
   the two fold instants described. Half-hour and 45-minute offsets, zones not measured here, and a
   fold landing exactly on a day-granularity boundary have not been checked.
 - `microbatch` models whose event time is a `date` column under a non-UTC `timezone`: the row-sifting
-  comparison itself is unmeasured there, since no row falls inside any window on any session
-  (`timestamp_ntz` under a non-UTC session is no longer in this list - it was measured end to end on
-  2026-10-20, and the outcome is in the table above: the shift drops rows it does not drop on
-  `master`). Also unmeasured: `timestamp_ntz` on a *negative*-offset session or with `batch_size: hour`,
-  and Python (MaxFrame) models on a non-UTC session - the MaxFrame path filters the returned DataFrame
-  in Python rather than in SQL, so it does not go through this rendering at all.
+  comparison itself is unmeasured there, since no row falls inside any window on any session. Such a
+  model now fails on a session that would move its window instead of reporting success, which is the
+  honest half; fixing `date` as an event column is a separate change (this pull request does not
+  attempt it). Also unmeasured: `timestamp_ntz` with `batch_size: hour`, and Python (MaxFrame) models
+  on a non-UTC session - the MaxFrame path filters the returned DataFrame in Python rather than in
+  SQL, so it does not go through this rendering at all;
+- the fallback that uses a YAML-declared type when the warehouse answer cannot be read: the *branch*
+  is unit-tested, but the server-side shape of "relation not materialised yet" is not - a
+  `dbt compile` against a target schema without the upstream is the way to reach it, and the refusal
+  message tells you when it happened;
+- `source()`-based event-time upstreams under a non-UTC `timezone` are covered below only as far as
+  the measurements in this paragraph go: the filter reaches the adapter through the same
+  `create_from` call as `ref()`, and the physical lookup is done on the relation being read, so the
+  type answer is expected to behave the same there;
+- the cost of one metadata call per distinct relation per invocation on projects with many upstream
+  relations - cached, but not benchmarked.

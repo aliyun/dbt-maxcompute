@@ -49,11 +49,25 @@ _EPOCHS = (
 )  # 05-01 01:00/23:00, 05-02 01:00/23:00 UTC
 
 
-def _input_sql(event_type):
-    rows = "\nunion all\n".join(
-        f"select {i} as id, cast(from_unixtime({epoch}) as {event_type}) as event_time"
-        for i, epoch in enumerate(_EPOCHS, start=1)
-    )
+def _input_sql(event_type, mode="epoch"):
+    """The four fixture rows, either as instants (`from_unixtime`) or as literal wall-clock text.
+
+    `epoch` is what the instant-bearing cells use: `from_unixtime()` does not depend on the session,
+    so a window moved by the session offset moves the rows by the same amount and the two shifts
+    would cancel out - the cell would pass whether or not the rendering was aligned.
+    `literal` is what a naive column needs: it has no clock to interpret an instant through, so the
+    text *is* the value, and 09:00/15:00 sit inside their own day on every session this file runs.
+    """
+    if mode == "literal":
+        rows = "\nunion all\n".join(
+            f"select {i} as id, {event_type}'{text}' as event_time"
+            for i, text in enumerate(_LITERALS, start=1)
+        )
+    else:
+        rows = "\nunion all\n".join(
+            f"select {i} as id, cast(from_unixtime({epoch}) as {event_type}) as event_time"
+            for i, epoch in enumerate(_EPOCHS, start=1)
+        )
     return "{{ config(materialized='table', event_time='event_time') }}\n" + rows + "\n"
 
 
@@ -72,6 +86,15 @@ def _model_sql(event_type):
         "select id, event_time from {{ ref('input_model') }}\n"
     )
 
+
+# 09:00 and 15:00 on each of the two batch days, as written. Used by the naive-type cells, where an
+# instant would be read through the session clock and land in a different day than its batch.
+_LITERALS = (
+    "2025-05-01 09:00:00",
+    "2025-05-01 15:00:00",
+    "2025-05-02 09:00:00",
+    "2025-05-02 15:00:00",
+)
 
 DAY1 = ("2025-05-01", "2025-05-02")
 DAY2 = ("2025-05-02", "2025-05-03")
@@ -112,17 +135,41 @@ def _window(start, end, select=None):
 
 
 class _DayWindowScenario:
-    """Subclasses choose the session timezone; the scenario and the expectations are the same."""
+    """Subclasses choose the session timezone and the event column; expectations are shared.
+
+    `declared_column_type` is what the upstream model's YAML property *says* its event column is:
+    left None for the honest cases, and set to something that disagrees with `event_column_type` for
+    the mismatch cases. The warehouse's own answer governs the window, so a property that contradicts
+    the column cannot move a batch back onto the wrong clock - and the two mismatch directions land
+    in different clocks, which is why both are here.
+    """
 
     profile_timezone = None
     event_column_type = "timestamp"
+    declared_column_type = None
+    input_mode = "epoch"
 
     @pytest.fixture(scope="class")
     def models(self):
-        return {
-            "input_model.sql": _input_sql(self.event_column_type),
+        files = {
+            "input_model.sql": _input_sql(self.event_column_type, mode=self.input_mode),
             "microbatch_model.sql": _model_sql(self.event_column_type),
         }
+        if self.declared_column_type:
+            files["schema.yml"] = yaml.safe_dump(
+                {
+                    "version": 2,
+                    "models": [
+                        {
+                            "name": "input_model",
+                            "columns": [
+                                {"name": "event_time", "data_type": self.declared_column_type}
+                            ],
+                        }
+                    ],
+                }
+            )
+        return files
 
     @pytest.fixture(scope="class")
     def dbt_profile_target(self):
@@ -140,7 +187,12 @@ class _DayWindowScenario:
         saved = options.local_timezone
         with open(filepath) as handle:
             target = yaml.safe_load(handle)
-        if self.profile_timezone:
+        if self.profile_timezone is None:
+            # "no timezone in the profile" has to mean that literally: the shared profile, and CI's
+            # DBT_PROFILE_YAML, may carry one - leaving it in place would run this class on a session
+            # its own docstring says it does not use.
+            target.pop("timezone", None)
+        else:
             target["timezone"] = self.profile_timezone
         try:
             yield target
@@ -179,6 +231,11 @@ class _DayWindowScenario:
             sum(counts.values()) == DAY1_ROWS + DAY2_ROWS
         ), f"each batch day keeps its own rows: {per_row}"
         assert len(counts) == 2, f"one partition per batch day, no window spans two: {per_row}"
+        # The assignment itself, not only its shape: a window that selects the right *number* of
+        # rows but the wrong ones - an off-by-one batch, a partition cut on another clock - would
+        # still pass the two assertions above.
+        expected_rows = {1: "2025-05-01", 2: "2025-05-01", 3: "2025-05-02", 4: "2025-05-02"}
+        assert {row_id: day[:10] for row_id, day in per_row.items()} == expected_rows, per_row
 
 
 class TestMicrobatchDefaultUtcSession(_DayWindowScenario):
@@ -212,6 +269,114 @@ class TestMicrobatchNegativeOffsetSession(_DayWindowScenario):
     """
 
     profile_timezone = "America/New_York"
+
+
+class TestMicrobatchNaiveColumnOnShiftedSession(_DayWindowScenario):
+    """`timestamp_ntz` on a session that pinned `Asia/Shanghai` - the case the shift would break.
+
+    A naive column is compared as written; it has no session clock to state a window on. Moving its
+    boundaries by +08:00 is exactly what turned "does not lose rows today" into "loses rows", so the
+    window stays on the UTC reading and every shared expectation holds.
+    """
+
+    profile_timezone = "Asia/Shanghai"
+    event_column_type = "timestamp_ntz"
+    input_mode = "literal"
+
+
+class TestMicrobatchNtzPhysicalDeclaredAsTimestamp(_DayWindowScenario):
+    """Physical `timestamp_ntz` declared `timestamp` in YAML: the warehouse answer governs.
+
+    Trusting the declaration here would shift the window and erase a neighbour's partition.
+    """
+
+    profile_timezone = "Asia/Shanghai"
+    event_column_type = "timestamp_ntz"
+    declared_column_type = "timestamp"
+    input_mode = "literal"
+
+
+class TestMicrobatchTimestampPhysicalDeclaredAsNtz(_DayWindowScenario):
+    """Physical `timestamp` declared `timestamp_ntz`: still shifted, because the column has a clock.
+
+    This is the shape a declaration-based guard would have left broken: the property says naive, the
+    column is instant-bearing, and skipping the shift reproduces the silent overwrite this branch
+    exists to fix.
+    """
+
+    profile_timezone = "Asia/Shanghai"
+    event_column_type = "timestamp"
+    declared_column_type = "timestamp_ntz"
+
+
+class TestMicrobatchFoldHourIsRefusedBeforeWriting:
+    """A folded hour on an instant-bearing column is refused before anything is written.
+
+    2025-11-02 in `America/New_York`: the UTC boundaries 05:00 and 06:00 are both 01:00 on that wall
+    clock. Rendering the window anyway selects no rows and the batch reports success, and whether the
+    folded hour is covered by a neighbour depends on the zone (measured: New York resolves the
+    repeated text to the earlier instant, Sydney to the later one, so in Sydney no batch covers it).
+    `tests/unit/test_microbatch_session_clock.py` pins the message and both zones; this pins the part
+    only a run can show - that the model does not come back green.
+    """
+
+    profile_timezone = "America/New_York"
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        input_sql = (
+            "{{ config(materialized='table', event_time='event_time') }}\n"
+            "select 1 as id, TIMESTAMP'2025-11-02 09:30:00' as event_time\n"
+            "union all\n"
+            "select 2 as id, TIMESTAMP'2025-11-02 10:30:00' as event_time\n"
+        )
+        model_sql = (
+            "{{ config(\n"
+            "    materialized='incremental',\n"
+            "    incremental_strategy='microbatch',\n"
+            "    unique_key='id',\n"
+            "    event_time='event_time',\n"
+            "    batch_size='hour',\n"
+            "    begin=modules.datetime.datetime(2025, 11, 2, 0, 0, 0),\n"
+            "    partition_by={'field': 'event_time', 'data_type': 'timestamp', "
+            "'granularity': 'hour'}\n"
+            ") }}\n"
+            "select id, event_time from {{ ref('input_model') }}\n"
+        )
+        return {"input_model.sql": input_sql, "microbatch_model.sql": model_sql}
+
+    @pytest.fixture(scope="class")
+    def dbt_profile_target(self):
+        from odps import options
+
+        filepath = os.environ.get("DBT_PROFILE_PATH")
+        if not filepath:
+            pytest.skip("needs a real MaxCompute profile via DBT_PROFILE_PATH")
+        saved = options.local_timezone
+        with open(filepath) as handle:
+            target = yaml.safe_load(handle)
+        target["timezone"] = self.profile_timezone
+        try:
+            yield target
+        finally:
+            options.local_timezone = saved
+
+    def test_the_fold_batch_errors_instead_of_reporting_success(self, project):
+        run_dbt(["run", "--select", "input_model"])
+        # `expect_pass=False` is the assertion: if this ever degrades back to "warn and write
+        # nothing", the run passes and this cell fails.
+        run_dbt(
+            [
+                "run",
+                "--select",
+                "microbatch_model",
+                "--event-time-start",
+                "2025-11-02 05:00:00",
+                "--event-time-end",
+                "2025-11-02 06:00:00",
+            ],
+            expect_pass=False,
+        )
 
 
 class TestMicrobatchDatetimeColumnOnShiftedSession(_DayWindowScenario):
