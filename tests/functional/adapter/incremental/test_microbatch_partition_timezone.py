@@ -96,6 +96,11 @@ _LITERALS = (
     "2025-05-02 15:00:00",
 )
 
+# Where every row has to end up, checked after each step and not only at the end: a window that
+# selects the right *number* of rows but the wrong ones - an off-by-one batch, a partition cut on
+# another clock - passes a count assertion and fails this one.
+EXPECTED_ASSIGNMENT = {1: "2025-05-01", 2: "2025-05-01", 3: "2025-05-02", 4: "2025-05-02"}
+
 DAY1 = ("2025-05-01", "2025-05-02")
 DAY2 = ("2025-05-02", "2025-05-03")
 DAY1_ROWS = 2
@@ -199,11 +204,16 @@ class _DayWindowScenario:
         finally:
             options.local_timezone = saved
 
+    @staticmethod
+    def _assignment(per_row):
+        return {row_id: day[:10] for row_id, day in per_row.items()}
+
     def test_adjacent_day_windows_never_lose_or_duplicate_rows(self, project):
         _window(*DAY1)
         assert _ids(project) == [1, 2], "the first window writes its own rows"
         per_row, partitions = _partition_of(project)
         assert len(partitions) == 1, f"one day window must touch one partition: {partitions}"
+        assert self._assignment(per_row) == {1: "2025-05-01", 2: "2025-05-01"}, per_row
 
         _window(*DAY2, select="microbatch_model")
         assert _ids(project) == [
@@ -214,6 +224,7 @@ class _DayWindowScenario:
         ], "an adjacent window must add its rows without erasing the previous window's"
         per_row, partitions = _partition_of(project)
         assert len(partitions) == 2, f"two day windows, two partitions: {partitions}"
+        assert self._assignment(per_row) == EXPECTED_ASSIGNMENT, per_row
 
         _window(*DAY1, select="microbatch_model")
         assert _ids(project) == [
@@ -231,11 +242,8 @@ class _DayWindowScenario:
             sum(counts.values()) == DAY1_ROWS + DAY2_ROWS
         ), f"each batch day keeps its own rows: {per_row}"
         assert len(counts) == 2, f"one partition per batch day, no window spans two: {per_row}"
-        # The assignment itself, not only its shape: a window that selects the right *number* of
-        # rows but the wrong ones - an off-by-one batch, a partition cut on another clock - would
-        # still pass the two assertions above.
-        expected_rows = {1: "2025-05-01", 2: "2025-05-01", 3: "2025-05-02", 4: "2025-05-02"}
-        assert {row_id: day[:10] for row_id, day in per_row.items()} == expected_rows, per_row
+
+        assert self._assignment(per_row) == EXPECTED_ASSIGNMENT, per_row
 
 
 class TestMicrobatchDefaultUtcSession(_DayWindowScenario):

@@ -280,4 +280,7 @@ which is the case a blanket "a non-UTC session is unsafe" rule would have failed
   `create_from` call as `ref()`, and the physical lookup is done on the relation being read, so the
   type answer is expected to behave the same there;
 - the cost of one metadata call per distinct relation per invocation on projects with many upstream
-  relations - cached, but not benchmarked.
+  relations - cached, but not benchmarked. The cache lives as long as the dbt process: a model that
+  re-creates the *same* relation with a *different* event-column type inside one invocation would be
+  judged by the first answer. Nothing measured here covers that; dropping the cache (one describe per
+  boundary instead of per relation) is the alternative, at the cost of more metadata calls.
