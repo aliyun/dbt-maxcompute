@@ -1,0 +1,325 @@
+# **what?**
+# Publishes one already-tagged version to PyPI and opens the matching GitHub
+# Release, with the live MaxCompute release checks as a required step in the same
+# run.
+#
+# **why?**
+# `release.yml` runs on every tag push and cannot be the publish trigger without
+# two things that do not exist yet in this repository: the `DBT_PROFILE_YAML`
+# repository secret, and a `pypi` environment (the repository currently reports
+# zero environments, so the previous `environment: pypi` declaration could never
+# have resolved). Rather than delete the trusted-publishing setup, this file keeps
+# it and makes the trigger explicit: publishing is a deliberate act by someone who
+# can see what is being published.
+#
+# **when?**
+# Manually, from *Actions > Publish release (manual) > Run workflow*, with the tag
+# to publish (e.g. `v1.12.1`). Nothing here runs on a tag push.
+
+name: Publish release (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish, for example v1.12.1'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write  # Required for trusted publishing to PyPI
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  preflight:
+    name: Preflight (tag, version, artifacts)
+
+    runs-on: ubuntu-latest
+
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+
+    steps:
+      - name: Resolve the tag
+        id: resolve
+        env:
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9] ]]; then
+            echo "::error::tag '$TAG' does not look like a release tag (expected v<semver>)"
+            exit 1
+          fi
+          # 一个 tag 名在 ls-remote 里可以占两行：附注 tag 本体与它剥开后的 commit。
+          # GitHub 上确实两行都给（本地镜像在只问一种形状时只给一行），所以这里显式取两行、优先要 commit。
+          listing="$(git ls-remote "https://github.com/$REPO" "refs/tags/$TAG" "refs/tags/$TAG^{}")"
+          if [ -z "$listing" ]; then
+            echo "::error::tag '$TAG' is not in this repository"
+            exit 1
+          fi
+          sha="$(printf '%s\n' "$listing" | awk '$2 ~ /\^\{\}$/ {print $1; exit}')"
+          peeled=yes
+          if [ -z "$sha" ]; then
+            sha="$(printf '%s\n' "$listing" | awk '{print $1; exit}')"
+            peeled=no
+          fi
+          version="${TAG#v}"
+          prerelease=false
+          if [[ "$version" == *a* || "$version" == *b* || "$version" == *rc* ]]; then
+            prerelease=true
+          fi
+          {
+            echo "## publishing"
+            echo ""
+            echo "- tag: \`$TAG\` -> \`$sha\` (peeled: \`$peeled\`)"
+            echo "- version: \`$version\`"
+            echo "- prerelease: \`$prerelease\`"
+            echo "- PyPI project: dbt-maxcompute"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$peeled" != "yes" ] && [ "$(printf '%s\n' "$listing" | wc -l)" -gt 1 ]; then
+            echo "::error::cannot resolve a single commit for '$TAG' from the ls-remote listing"
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "sha=$sha"
+            echo "tag=$TAG"
+            echo "peeled=$peeled"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+  release-tests:
+    name: Core, MaxFrame, and UDF Tests (required)
+
+    needs: preflight
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Require the publish gate in this checkout
+        run: |
+          set -uo pipefail
+          for required in scripts/publish_gate.py tests/maxcompute_gating.py; do
+            if [ ! -f "$required" ]; then
+              echo "::error::$required is absent from ${{ inputs.tag }}: that predates the publish gate"
+              echo "          Refusing to publish from a tag that cannot prove live evidence."
+              exit 1
+            fi
+          done
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --user --upgrade pip
+          python -m pip install -r dev-requirements.txt
+          python -m pip install -e ".[maxframe,semantic]"
+          python -m pip --version
+          dbt --version
+
+      - name: Require a MaxCompute test profile
+        env:
+          DBT_PROFILE_YAML: ${{ secrets.DBT_PROFILE_YAML }}
+        run: |
+          set -uo pipefail
+          if [ -z "$DBT_PROFILE_YAML" ]; then
+            {
+              echo ""
+              echo "## publish blocked"
+              echo ""
+              echo "- \`DBT_PROFILE_YAML\` is not configured, so the release functional tests cannot run."
+              echo "- This workflow does not publish without them. See docs/releasing.md."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::refusing to publish without live MaxCompute evidence: DBT_PROFILE_YAML is not configured"
+            exit 1
+          fi
+          profile_path="$RUNNER_TEMP/dbt_profile.yml"
+          printf '%s\n' "$DBT_PROFILE_YAML" > "$profile_path"
+          chmod 600 "$profile_path"
+          echo "DBT_PROFILE_PATH=$profile_path" >> "$GITHUB_ENV"
+
+      - name: Validate the profile before any test runs
+        run: |
+          set -uo pipefail
+          # Nonempty is not the same as usable: a profile like `{}` satisfies the shell
+          # check above and then makes every functional case skip, which pytest reports
+          # as a pass. Ask the shared gating question and fail closed on its answer.
+          python tests/maxcompute_gating.py blocked
+
+      - name: Run unit tests
+        run: pytest tests/unit tests/unit_test -q --junitxml=report-unit.xml
+
+      - name: Run release functional tests
+        run: >-
+          pytest
+          tests/functional/test_core.py
+          tests/functional/adapter/test_python_model.py
+          tests/functional/adapter/test_udf.py
+          -v --tb=short
+          --junitxml=report-functional.xml
+        env:
+          DBT_TEST_USER_1: RAM$mc_schema@test.aliyunid.com:test_user_2507
+          DBT_TEST_USER_2: RAM$mc_schema@test.aliyunid.com:test_user_2507
+          DBT_TEST_USER_3: RAM$mc_schema@test.aliyunid.com:test_user_2507
+
+      - name: Require live evidence before anything downstream can run
+        run: |
+          set -uo pipefail
+          python scripts/publish_gate.py functional --xml report-unit.xml --min-passed 1
+          # No --allow-skip here: none of these three suites has a capability skip today,
+          # so a skipped case in any of them means the live set did not run.
+          python scripts/publish_gate.py functional --xml report-functional.xml \
+            --require tests/functional/test_core.py,tests/functional/adapter/test_python_model.py,tests/functional/adapter/test_udf.py
+
+  build:
+    name: Build distribution
+
+    needs: [preflight, release-tests]
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0  # Fetch all history for version detection
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --user --upgrade pip
+          python -m pip install --upgrade setuptools wheel build twine check-wheel-contents
+          python -m pip --version
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Check distribution descriptions
+        run: twine check dist/*
+
+      - name: Check wheel contents
+        run: check-wheel-contents dist/*.whl --ignore W007,W008
+
+      - name: Refuse a build whose version does not match the tag
+        run: |
+          set -uo pipefail
+          version='${{ needs.preflight.outputs.version }}'
+          if [ ! -f "dist/dbt_maxcompute-${version}-py3-none-any.whl" ]; then
+            echo "::error::expected dist/dbt_maxcompute-${version}-py3-none-any.whl, found: $(ls dist)"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          overwrite: true
+
+  publish-pypi:
+    name: Publish to PyPI
+
+    needs: [preflight, release-tests, build]
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: pypi
+      url: https://pypi.org/p/dbt-maxcompute
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  create-github-release:
+    name: Create GitHub Release
+
+    needs: [preflight, publish-pypi]
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Generate release notes
+        id: release_notes
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -uo pipefail
+          # 用 tag 名加 ^ 取它指向的提交：附注与轻量 tag 都成立（附注 tag 对象本身没有父提交）
+          target="$(git rev-list -n 1 "$TAG^" 2>/dev/null || echo "")"   # 首个 release 时没有父提交，这里取空并按 Initial Release 走
+          PREV_TAG=$(git describe --tags --abbrev=0 "$target" 2>/dev/null || echo "")
+          {
+            echo "RELEASE_NOTES<<EOF"
+            if [ -n "$PREV_TAG" ]; then
+              echo "## Changes since $PREV_TAG"
+              echo ""
+              git log "$PREV_TAG..$target" --oneline --pretty=format:"- %s (%h)"
+            else
+              echo "## Initial Release"
+              echo ""
+              git log --oneline --pretty=format:"- %s (%h)" | head -20
+            fi
+            echo ""
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ needs.preflight.outputs.version }}
+          body: ${{ steps.release_notes.outputs.RELEASE_NOTES }}
+          files: dist/*
+          draft: false
+          prerelease: ${{ needs.preflight.outputs.prerelease }}
+          generate_release_notes: false
+
+      - name: Report what to verify afterwards
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          {
+            echo ""
+            echo "## verify after this run"
+            echo ""
+            echo "- PyPI files must be byte-identical to the release assets:"
+            echo "  \`curl -s https://pypi.org/pypi/dbt-maxcompute/$VERSION/json\`"
+            echo "  and compare each \`digests.sha256\` with the \`digest\` of the same file on the release."
+            echo "- The PyPI upload time must be later than the \`Publish to PyPI\` job of this run."
+          } >> "$GITHUB_STEP_SUMMARY"
