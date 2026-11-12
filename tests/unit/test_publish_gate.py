@@ -22,7 +22,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 GATE_PATH = REPO_ROOT / "scripts" / "publish_gate.py"
 GATING_PATH = REPO_ROOT / "tests" / "maxcompute_gating.py"
 
-REQUIRED = ("tests/functional/test_core.py", "tests/functional/adapter/test_python_model.py", "tests/functional/adapter/test_udf.py")
+REQUIRED = (
+    "tests/functional/test_core.py",
+    "tests/functional/adapter/test_python_model.py",
+    "tests/functional/adapter/test_udf.py",
+)
 
 
 def _gate():
@@ -39,7 +43,9 @@ def _xml(cases):
             "cls": c["classname"],
             "name": c["name"],
             "f": c["file"],
-            "child": ("<skipped message=%r />" % c["reason"]) if c.get("reason") is not None else "",
+            "child": (
+                ("<skipped message=%r />" % c["reason"]) if c.get("reason") is not None else ""
+            ),
         }
         for c in cases
     )
@@ -88,9 +94,24 @@ def test_all_skipped_functional_result_is_refused_even_though_pytest_exits_zero(
     """The reviewed shape: every case skipped because the profile was unusable."""
     tmp = tempfile.mkdtemp(prefix="gate-skip-")
     cases = [
-        _skipped("tests.functional.test_core", "test_a", REQUIRED[0], "MaxCompute integration not run: profile is missing required key(s)"),
-        _skipped("tests.functional.adapter.test_python_model", "test_b", REQUIRED[1], "MaxCompute integration not run: profile is missing required key(s)"),
-        _skipped("tests.functional.adapter.test_udf", "test_c", REQUIRED[2], "MaxCompute integration not run: profile is missing required key(s)"),
+        _skipped(
+            "tests.functional.test_core",
+            "test_a",
+            REQUIRED[0],
+            "MaxCompute integration not run: profile is missing required key(s)",
+        ),
+        _skipped(
+            "tests.functional.adapter.test_python_model",
+            "test_b",
+            REQUIRED[1],
+            "MaxCompute integration not run: profile is missing required key(s)",
+        ),
+        _skipped(
+            "tests.functional.adapter.test_udf",
+            "test_c",
+            REQUIRED[2],
+            "MaxCompute integration not run: profile is missing required key(s)",
+        ),
     ]
     xml = _write(tmp, _xml(cases))
     result = _run(["functional", "--xml", xml, "--require", ",".join(REQUIRED)])
@@ -107,7 +128,13 @@ def test_nonempty_incomplete_profile_is_blocked_by_the_shared_gate():
         handle.write("{}\n")
     env = dict(os.environ)
     env["DBT_PROFILE_PATH"] = profile
-    result = subprocess.run([sys.executable, str(GATING_PATH), "blocked"], capture_output=True, text=True, env=env, cwd=str(REPO_ROOT))
+    result = subprocess.run(
+        [sys.executable, str(GATING_PATH), "blocked"],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(REPO_ROOT),
+    )
     assert result.returncode == 1, result.stdout + result.stderr
     assert "missing required key(s)" in result.stdout
     assert "access_key" not in result.stdout.lower()  # no credential material echoed
@@ -132,7 +159,9 @@ def test_report_with_zero_cases_is_unusable_not_passing():
 
 
 def test_missing_report_is_refused():
-    result = _run(["functional", "--xml", "/nonexistent/report-functional.xml", "--require", REQUIRED[0]])
+    result = _run(
+        ["functional", "--xml", "/nonexistent/report-functional.xml", "--require", REQUIRED[0]]
+    )
     assert result.returncode == 2
     assert "never ran" in result.stderr
 
@@ -156,7 +185,12 @@ def test_explicit_capability_skip_is_the_only_accepted_skip():
     tmp = tempfile.mkdtemp(prefix="gate-capability-")
     cases = [
         _passed("tests.functional.test_core", "test_a", REQUIRED[0]),
-        _skipped("tests.functional.adapter.test_python_model", "test_b", REQUIRED[1], "Python model requires dbt-core >= 1.7"),
+        _skipped(
+            "tests.functional.adapter.test_python_model",
+            "test_b",
+            REQUIRED[1],
+            "Python model requires dbt-core >= 1.7",
+        ),
         _passed("tests.functional.adapter.test_udf", "test_c", REQUIRED[2]),
     ]
     xml = _write(tmp, _xml(cases))

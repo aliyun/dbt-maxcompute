@@ -82,11 +82,13 @@ def evaluate(
 
     if broken:
         problems.append(
-            "%d case(s) failed or errored: %s" % (len(broken), "; ".join(_label(c) for c in broken[:5]))
+            "%d case(s) failed or errored: %s"
+            % (len(broken), "; ".join(_label(c) for c in broken[:5]))
         )
     if len(passed) < min_passed:
         problems.append(
-            "only %d live case(s) passed, %d required (skipped: %d)" % (len(passed), min_passed, len(skipped))
+            "only %d live case(s) passed, %d required (skipped: %d)"
+            % (len(passed), min_passed, len(skipped))
         )
 
     for token in required:
@@ -134,17 +136,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=[],
         help="a skip reason substring that makes a skipped required suite acceptable (repeatable)",
     )
-    fun.add_argument("--min-passed", type=int, default=1, help="minimum passing cases overall (default 1)")
+    fun.add_argument(
+        "--min-passed", type=int, default=1, help="minimum passing cases overall (default 1)"
+    )
     args = parser.parse_args(argv)
 
     required = [t.strip() for t in args.require.split(",") if t.strip()]
     try:
         cases = read_results(args.xml)
     except FileNotFoundError:
-        print("::error::no functional report at %s: the suite never ran" % args.xml, file=sys.stderr)
+        print(
+            "::error::no functional report at %s: the suite never ran" % args.xml, file=sys.stderr
+        )
         return 2
     except ET.ParseError as exc:
-        print("::error::functional report %s is not parsable: %s" % (args.xml, exc), file=sys.stderr)
+        print(
+            "::error::functional report %s is not parsable: %s" % (args.xml, exc), file=sys.stderr
+        )
         return 2
 
     counts: Dict[str, int] = {}
@@ -156,7 +164,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         for problem in problems:
             print("::error::publish gate refused: %s" % problem, file=sys.stderr)
         return 1
-    print("publish gate satisfied for %s (required: %s)" % (args.xml, ", ".join(required) or "none"))
+    print(
+        "publish gate satisfied for %s (required: %s)" % (args.xml, ", ".join(required) or "none")
+    )
     return 0
 
 
