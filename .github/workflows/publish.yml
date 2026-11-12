@@ -109,6 +109,17 @@ jobs:
           ref: ${{ inputs.tag }}
           persist-credentials: false
 
+      - name: Require the publish gate in this checkout
+        run: |
+          set -uo pipefail
+          for required in scripts/publish_gate.py tests/maxcompute_gating.py; do
+            if [ ! -f "$required" ]; then
+              echo "::error::$required is absent from ${{ inputs.tag }}: that predates the publish gate"
+              echo "          Refusing to publish from a tag that cannot prove live evidence."
+              exit 1
+            fi
+          done
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -143,8 +154,16 @@ jobs:
           chmod 600 "$profile_path"
           echo "DBT_PROFILE_PATH=$profile_path" >> "$GITHUB_ENV"
 
+      - name: Validate the profile before any test runs
+        run: |
+          set -uo pipefail
+          # Nonempty is not the same as usable: a profile like `{}` satisfies the shell
+          # check above and then makes every functional case skip, which pytest reports
+          # as a pass. Ask the shared gating question and fail closed on its answer.
+          python tests/maxcompute_gating.py blocked
+
       - name: Run unit tests
-        run: pytest tests/unit tests/unit_test -q
+        run: pytest tests/unit tests/unit_test -q --junitxml=report-unit.xml
 
       - name: Run release functional tests
         run: >-
@@ -153,10 +172,20 @@ jobs:
           tests/functional/adapter/test_python_model.py
           tests/functional/adapter/test_udf.py
           -v --tb=short
+          --junitxml=report-functional.xml
         env:
           DBT_TEST_USER_1: RAM$mc_schema@test.aliyunid.com:test_user_2507
           DBT_TEST_USER_2: RAM$mc_schema@test.aliyunid.com:test_user_2507
           DBT_TEST_USER_3: RAM$mc_schema@test.aliyunid.com:test_user_2507
+
+      - name: Require live evidence before anything downstream can run
+        run: |
+          set -uo pipefail
+          python scripts/publish_gate.py functional --xml report-unit.xml --min-passed 1
+          # No --allow-skip here: none of these three suites has a capability skip today,
+          # so a skipped case in any of them means the live set did not run.
+          python scripts/publish_gate.py functional --xml report-functional.xml \
+            --require tests/functional/test_core.py,tests/functional/adapter/test_python_model.py,tests/functional/adapter/test_udf.py
 
   build:
     name: Build distribution
