@@ -457,6 +457,60 @@ class TestAnEmptyWindowIsRefusedAndNamedAsWhatItIs:
             _render(start=self.SAME, end=self.SAME)
         assert "window is empty" in str(refused.value)
 
+    def test_the_refusal_is_also_logged_because_dbt_drops_the_text(
+        self, session_clock, monkeypatch
+    ):
+        """The explanation has to reach the console, not only the exception.
+
+        Measured on a real project: a failing microbatch batch reports `ERROR` as the model message
+        and the exception text never appears (probe in this item's evidence). So the reason is logged
+        at error level as well; this pins that each refusal logs what it raises, and that a window
+        which is *not* refused logs nothing at that level.
+        """
+        logged = []
+        monkeypatch.setattr(
+            relation_module.logger, "error", lambda message: logged.append(str(message))
+        )
+
+        options.local_timezone = "Asia/Shanghai"
+        moment = datetime(2025, 5, 1, tzinfo=pytz.UTC)
+        with pytest.raises(DbtRuntimeError):
+            _render(start=moment, end=moment)
+        assert len(logged) == 1 and "window is empty" in logged[0]
+
+        logged.clear()
+        with pytest.raises(DbtRuntimeError):
+            _render(column_type=None, declared_type=None)
+        assert len(logged) == 1 and "could not be read" in logged[0]
+
+        logged.clear()
+        options.local_timezone = "America/New_York"
+        with pytest.raises(DbtRuntimeError):
+            _render(
+                start=datetime(2025, 11, 2, 5, tzinfo=pytz.UTC),
+                end=datetime(2025, 11, 2, 6, tzinfo=pytz.UTC),
+            )
+        assert len(logged) == 1 and "daylight-saving fold" in logged[0]
+
+        logged.clear()
+        _render()  # an ordinary aligned window on a shifted session
+        assert logged == []
+
+    def test_a_declared_type_used_as_fallback_is_said_at_warning_level(
+        self, session_clock, monkeypatch
+    ):
+        """The fallback is unverified, and 'debug' is not where an unverified decision belongs."""
+        logged = []
+        monkeypatch.setattr(
+            relation_module.logger, "warning", lambda message: logged.append(str(message))
+        )
+        options.local_timezone = "Asia/Shanghai"
+        assert _render(column_type=None, declared_type="timestamp") == _window(
+            "2025-05-01 08:00:00", "2025-05-02 08:00:00"
+        )
+        assert len(logged) == 1
+        assert "has not been verified against the column" in logged[0]
+
     def test_the_fold_branch_still_fires_for_two_distinct_instants(self, session_clock):
         """Positive control: same collapsed text, different instants - and a different message.
 

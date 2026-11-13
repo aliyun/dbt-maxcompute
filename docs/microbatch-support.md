@@ -258,6 +258,14 @@ differs: widen the sample window, or run the batch with `--event-time-start`/`--
 *are* ordering-checked at the CLI. Both refusal branches assert the other branch's wording is absent,
 so swapping them fails loudly rather than quietly mis-advising someone.
 
+Refusing is only useful if the reason is seen. Measured on a real project: when a microbatch batch
+fails this way, dbt reports the model with the message `ERROR` and the exception text does not reach
+the console at all - it was visible only by intercepting the raise. So each refusal is logged at error
+level too (the channel this adapter's other messages use, which the console does show), and a unit
+case asserts the logged text is the raised text for all three refusals - and that an ordinary aligned
+window logs nothing at that level. A declared type used as the fallback is said the same way, at
+warning level: it is a decision that has not been checked against the column.
+
 
 ## Not verified here
 
@@ -280,14 +288,17 @@ so swapping them fails loudly rather than quietly mis-advising someone.
   attempt it). Also unmeasured: `timestamp_ntz` with `batch_size: hour`, and Python (MaxFrame) models
   on a non-UTC session - the MaxFrame path filters the returned DataFrame in Python rather than in
   SQL, so it does not go through this rendering at all;
-- the fallback that uses a YAML-declared type when the warehouse answer cannot be read: the *branch*
-  is unit-tested, but the server-side shape of "relation not materialised yet" is not - a
-  `dbt compile` against a target schema without the upstream is the way to reach it, and the refusal
-  message tells you when it happened;
-- `source()`-based event-time upstreams under a non-UTC `timezone` are covered below only as far as
-  the measurements in this paragraph go: the filter reaches the adapter through the same
-  `create_from` call as `ref()`, and the physical lookup is done on the relation being read, so the
-  type answer is expected to behave the same there;
+- the fallback branch that uses a YAML-declared type when the warehouse answer cannot be read is
+  unit-tested, and its *refusal* half is measured on a live project (a microbatch model run without
+  its upstream table present, on a Shanghai session: the describe retries three times, the batch
+  errors at ~30s, and the reason is the unverifiable-clock message rather than a guess). What is
+  still not measured live is the fallback that *uses* the declaration, which would need a fixture
+  whose upstream relation is missing while its YAML declares the column;
+- `source()`-based event-time upstreams: measured as far as the plumbing goes on a real project -
+  the filter arrives through the same `create_from(..., target_source, ...)` call as `ref()`, the
+  declared type is readable there, and the relation in another schema can be described, with the
+  window rendering on the session clock - but the row-and-partition behaviour of a *source*-based
+  upstream across the type branches has not been run as a cell;
 - the cost of one metadata call per distinct relation per invocation on projects with many upstream
   relations - cached, but not benchmarked. The cache lives as long as the dbt process: a model that
   re-creates the *same* relation with a *different* event-column type inside one invocation would be

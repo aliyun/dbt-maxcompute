@@ -343,7 +343,7 @@ class MaxComputeRelation(BaseRelation):
             else:
                 text = shifted
             if kind == "unknown" and shifted != utc_text:
-                raise DbtRuntimeError(
+                raise self._refuse(
                     self._unverifiable_clock_message(event_time_filter.field_name, _boundary, text)
                 )
             chosen.append(text)
@@ -363,10 +363,23 @@ class MaxComputeRelation(BaseRelation):
             #     the repeated text (measured: America/New_York takes the earlier instant,
             #     Australia/Sydney the later one, so there the hour is written by no batch).
             if _utc_moment(boundaries[0][0]) == _utc_moment(boundaries[1][0]):
-                raise DbtRuntimeError(self._empty_window_message(chosen[0]))
-            raise DbtRuntimeError(self._folded_window_message(chosen[0]))
+                raise self._refuse(self._empty_window_message(chosen[0]))
+            raise self._refuse(self._folded_window_message(chosen[0]))
 
         return " and ".join(parts) if parts else base
+
+    def _refuse(self, message: str) -> DbtRuntimeError:
+        """Log the reason, then hand back the error to raise.
+
+        Measured on a real project: a dbt microbatch run that fails inside batch rendering prints
+        only `ERROR` for the model - the exception text does not reach the console (`RunResult.message`
+        was literally `ERROR`, and the full text was visible only when the raise was intercepted). A
+        refusal whose explanation is discarded is not a clear rejection path, so the message is also
+        logged at error level, which this adapter's other messages already use and the console shows.
+        The exception is still raised, so the batch is not submitted either way.
+        """
+        logger.error(message)
+        return DbtRuntimeError(message)
 
     def _event_field_clock_kind(self, field_name: str) -> str:
         """`instant` / `naive` / `unknown` - the field's own type, warehouse answer first.
@@ -382,10 +395,11 @@ class MaxComputeRelation(BaseRelation):
             if name == wanted:
                 return clock_kind_of(raw_type)
         if self.event_field_declared_type:
-            logger.debug(
+            logger.warning(
                 "MaxCompute adapter: the physical type of %r on %s could not be read, so the "
-                "microbatch window is decided from the declared type %r, which is not verified "
-                "against the column." % (field_name, self.render(), self.event_field_declared_type)
+                "microbatch window is decided from the declared type %r, which has not been "
+                "verified against the column."
+                % (field_name, self.render(), self.event_field_declared_type)
             )
             return clock_kind_of(self.event_field_declared_type)
         return "unknown"
