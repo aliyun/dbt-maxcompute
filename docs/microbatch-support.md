@@ -249,6 +249,15 @@ York and midnight in Sydney, never the folded hour. A naive (`timestamp_ntz`) fi
 a fold day at all: its two boundaries stay on the UTC reading, so they remain two distinct texts -
 which is the case a blanket "a non-UTC session is unsafe" rule would have failed.
 
+A collapsed text has one other cause, and it is not a fold: a window whose two ends are the *same*
+instant. `--sample` given as a dict is not ordering-checked by dbt-core, so a zero-width sample window
+does reach the renderer, and Core's own batch bounds collapse onto one instant
+(`truncate_timestamp(start)` == `ceiling_timestamp(end)`, pinned against Core in the unit suite). That
+is refused too, with its own message - "this is not a daylight-saving fold" - because the advice
+differs: widen the sample window, or run the batch with `--event-time-start`/`--event-time-end`, which
+*are* ordering-checked at the CLI. Both refusal branches assert the other branch's wording is absent,
+so swapping them fails loudly rather than quietly mis-advising someone.
+
 
 ## Not verified here
 

@@ -350,13 +350,20 @@ class MaxComputeRelation(BaseRelation):
             parts.append(f"{event_time_filter.field_name} {operator} '{text}'")
 
         if len(chosen) == 2 and chosen[0] == chosen[1]:
-            # Two different instants, one wall clock: the session is inside a DST fold, and a
-            # half-open window cannot be stated there at all. Writing anyway would select nothing,
-            # and whether the hour it was meant to cover is written by its neighbour depends on
-            # which side of the fold the server resolves the repeated text to (measured:
-            # America/New_York picks the earlier instant, Australia/Sydney the later one, so there
-            # the hour is written by no batch). A warning would leave a batch that writes nothing
-            # and reports success, so the batch is refused before anything is written.
+            # A half-open window whose two ends state the same wall clock selects no rows, so
+            # running it would write nothing and report success - the shape this file exists to
+            # remove. Two different situations produce it and they need different advice, so the
+            # instants themselves are compared, not just the text:
+            #   * same instant at both ends: an empty window, which only `--sample` in its dict
+            #     form can hand over (SampleWindow.from_dict does not order-check, and Core's
+            #     truncate(start) == ceiling(end) then yields a zero-width batch; the CLI already
+            #     refuses `--event-time-start >= --event-time-end`);
+            #   * distinct instants: the session is inside a DST fold, where the hour is repeated
+            #     and which neighbour batch covers it (if any) depends on how the server resolves
+            #     the repeated text (measured: America/New_York takes the earlier instant,
+            #     Australia/Sydney the later one, so there the hour is written by no batch).
+            if _utc_moment(boundaries[0][0]) == _utc_moment(boundaries[1][0]):
+                raise DbtRuntimeError(self._empty_window_message(chosen[0]))
             raise DbtRuntimeError(self._folded_window_message(chosen[0]))
 
         return " and ".join(parts) if parts else base
@@ -401,6 +408,17 @@ class MaxComputeRelation(BaseRelation):
                 options.local_timezone,
                 self.render(),
             )
+        )
+
+    def _empty_window_message(self, text: str) -> str:
+        return (
+            "MaxCompute refuses to write this microbatch batch: its window is empty - both ends are "
+            "the same instant, so it reads '%s' twice and would select no rows, write no partition "
+            "and report success. This is not a daylight-saving fold. It comes from a sample window "
+            'given as a dict whose start and end fall inside one batch (`--sample "{start: ..., '
+            'end: ...}"`), which dbt-core accepts without ordering them; `--event-time-start` and '
+            "`--event-time-end` are checked for ordering at the CLI. Widen the sample window, or run "
+            "the batch with `--event-time-start` and `--event-time-end`." % text
         )
 
     def _folded_window_message(self, text: str) -> str:

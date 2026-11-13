@@ -427,3 +427,71 @@ class TestWhichTypeDecidesTheClock:
             )
         assert asked == ["up_stream", "other_stream"], asked
         relation_module._PHYSICAL_TYPE_CACHE.clear()
+
+
+class TestAnEmptyWindowIsRefusedAndNamedAsWhatItIs:
+    """Two ends stating the same wall clock is a refusal either way; which one needs the *instants*.
+
+    A zero-width window is reachable: `--sample` in its dict form is not ordering-checked by
+    dbt-core, and Core's `truncate_timestamp(start)` == `ceiling_timestamp(end)` then hands the
+    renderer one instant twice. Calling that a daylight-saving fold would send the user to change
+    their `timezone`, which is the wrong advice - so the two branches are told apart by comparing
+    the instants, not the text.
+    """
+
+    SAME = datetime(2025, 5, 1, 0, 0, 0, tzinfo=pytz.UTC)
+
+    def test_a_zero_width_window_says_empty_and_denies_the_fold(self, session_clock):
+        options.local_timezone = "Asia/Shanghai"
+        with pytest.raises(DbtRuntimeError) as refused:
+            _render(start=self.SAME, end=self.SAME)
+        message = str(refused.value)
+        assert "window is empty" in message
+        assert "not a daylight-saving fold" in message
+        assert "--sample" in message
+
+    def test_a_zero_width_window_is_refused_on_a_utc_session_too(self, session_clock):
+        """Nothing is moved here, but a batch that selects nothing still should not report success."""
+        options.local_timezone = False
+        with pytest.raises(DbtRuntimeError) as refused:
+            _render(start=self.SAME, end=self.SAME)
+        assert "window is empty" in str(refused.value)
+
+    def test_the_fold_branch_still_fires_for_two_distinct_instants(self, session_clock):
+        """Positive control: same collapsed text, different instants - and a different message.
+
+        Without this pair the two branches could be swapped and every assertion above would still
+        pass, because both texts are identical in both cases.
+        """
+        options.local_timezone = "America/New_York"
+        with pytest.raises(DbtRuntimeError) as refused:
+            _render(
+                start=datetime(2025, 11, 2, 5, tzinfo=pytz.UTC),
+                end=datetime(2025, 11, 2, 6, tzinfo=pytz.UTC),
+            )
+        message = str(refused.value)
+        assert "daylight-saving fold" in message
+        assert "window is empty" not in message
+
+    def test_the_shape_is_reachable_because_the_sample_window_is_not_ordered(self):
+        """Pinned against dbt-core, so this branch is deleted the day Core orders it.
+
+        `--event-time-start`/`--event-time-end` are ordering-checked at the CLI
+        (`dbt/cli/flags.py::_validate_event_time_configs`), and the relative `--sample "3 days"`
+        form is ordered by construction. The dict form is not: SampleWindow.from_dict takes any
+        pair, and Core's batch bounds then collapse to one instant.
+        """
+        from dbt.artifacts.resources.types import BatchSize
+        from dbt.event_time.sample_window import SampleWindow
+        from dbt.materializations.incremental.microbatch import MicrobatchBuilder
+
+        moment = datetime(2025, 5, 1, tzinfo=pytz.UTC)
+        window = SampleWindow.from_dict({"start": moment, "end": moment})
+        assert window.start == window.end
+        for grain in ("hour", "day"):
+            size = BatchSize(grain)
+            start = MicrobatchBuilder.truncate_timestamp(window.start, size)
+            end = MicrobatchBuilder.ceiling_timestamp(window.end, size)
+            assert start == end, (grain, start, end)
+        relative = SampleWindow.from_relative_string("2 hours")
+        assert relative.start < relative.end
