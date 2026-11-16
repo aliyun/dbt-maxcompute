@@ -176,19 +176,25 @@ Three details of that rule are the substance, not footnotes:
   shift and reproduced the silent overwrite. The reverse, physically `timestamp_ntz` declared
   `timestamp`: the physical answer leaves the window on UTC and nothing is lost - trusting the
   declaration would have shifted it and erased a neighbour's partition. A guard that read the
-  declaration would have been wrong in both directions, which is why it is only a fallback (below).
-* **An ephemeral model in between is that fallback's real shape.** `ref()`ing an ephemeral model
-  puts a CTE name where a relation would be, so there is nothing to describe: the declared type is
-  used, and if nothing declares the column either the batch is refused on a moved session (the
-  message says so) rather than guessed. Materialise the intermediate model, or declare its event
-  column, and the window is decided from the column again.
-* **When the warehouse cannot be asked, the declaration is used and said to be unverified.** A
-  relation that does not exist yet (`dbt compile` against a target schema where the upstream has
-  not been built) or a connection that cannot describe it yields no physical answer; the node's
-  declared type is then used, with a debug line saying it was not verified against the column. If
-  neither answers on a session that would move the text, the run **raises** rather than guessing,
-  and the message names the relation, the boundary, the session timezone and the two ways to make
-  the type verifiable.
+  declaration would have been wrong in both directions.
+* **When the warehouse cannot be asked, nothing is inferred from YAML.** A relation that does not
+  exist yet (`dbt compile` against a target schema where the upstream has not been built), a
+  connection that cannot describe it, or an ephemeral model in between - `ref()`ing one puts a CTE
+  name where a relation would be - all leave the type unverified, and an unverified declaration
+  picks the clock just as unverified as guessing did. On a session that would move the text the batch
+  is **refused**: declared `timestamp` would shift a naive column into its neighbour's partition,
+  declared `timestamp_ntz` would leave an instant-bearing column unshifted, and the describe that
+  failed is exactly the moment those two claims stop being evidence. The refusal names the
+  declaration it declined, so the user sees what was not trusted; materialise the relation being read
+  (or run on the default UTC session) and the window is decided from the column again. A
+  declaration-only mode would have to be *asked for* - an explicit trust contract, off by default -
+  which is a different feature from a fallback that switches on after a failure nobody noticed.
+* **Nothing is remembered between window decisions.** The type of a relation is asked of the
+  warehouse each time a batch's clock is decided, and a failed lookup is not remembered either. A
+  memo keyed by project/schema/table cannot see the two things that do change the answer: another
+  invocation in the same process (a wrapper script, a retried batch after the upstream was recreated
+  with a different column type), and a describe that failed once and would otherwise keep refusing
+  after the relation appeared.
 * **Type names are normalised before the decision** - case-insensitive, separators dropped, so
   `TIMESTAMP_NTZ`, `timestamp-ntz` and `timestamp_ntz` land in the same branch. A spelling this
   version does not recognise is `unknown` (refused on a moved session), not silently naive.
@@ -197,8 +203,11 @@ Two costs, stated as costs. Models on a non-UTC session whose event column is `d
 type, or unverifiable now **fail** where they previously ran: for `date` that run selected no rows in
 any window and reported success (a separate limitation, still out of scope here - what changed is
 that it is no longer silent), and for a naive column with no readable type the run used to pick the
-shifted reading by default. And deciding the clock costs one metadata call per distinct relation per
-invocation, cached rather than repeated per batch boundary.
+shifted reading by default. And deciding the clock costs a metadata call per batch per relation being
+filtered - a model read by ten daily batches is described ten times - because an answer that could
+be stale would decide the wrong clock, which is the failure this file is about. The 9-cell live run
+in `tests/functional/adapter/incremental/test_microbatch_partition_timezone.py` is the only cost
+measurement here; it is not a benchmark of projects with many upstream relations.
 
 On the adapter's default profile - no `timezone` in the profile, so the session runs on UTC - the two
 readings are the same text: nothing is moved, no clock has to be consulted, and no type lookup
@@ -263,8 +272,8 @@ fails this way, dbt reports the model with the message `ERROR` and the exception
 the console at all - it was visible only by intercepting the raise. So each refusal is logged at error
 level too (the channel this adapter's other messages use, which the console does show), and a unit
 case asserts the logged text is the raised text for all three refusals - and that an ordinary aligned
-window logs nothing at that level. A declared type used as the fallback is said the same way, at
-warning level: it is a decision that has not been checked against the column.
+window logs nothing at that level. A declaration that is declined is said at warning level too, and
+named in the refusal, so the user can see which claim was not trusted and why.
 
 
 ## Not verified here
@@ -288,19 +297,18 @@ warning level: it is a decision that has not been checked against the column.
   attempt it). Also unmeasured: `timestamp_ntz` with `batch_size: hour`, and Python (MaxFrame) models
   on a non-UTC session - the MaxFrame path filters the returned DataFrame in Python rather than in
   SQL, so it does not go through this rendering at all;
-- the fallback branch that uses a YAML-declared type when the warehouse answer cannot be read is
-  unit-tested, and its *refusal* half is measured on a live project (a microbatch model run without
-  its upstream table present, on a Shanghai session: the describe retries three times, the batch
-  errors at ~30s, and the reason is the unverifiable-clock message rather than a guess). What is
-  still not measured live is the fallback that *uses* the declaration, which would need a fixture
-  whose upstream relation is missing while its YAML declares the column;
-- `source()`-based event-time upstreams: measured as far as the plumbing goes on a real project -
-  the filter arrives through the same `create_from(..., target_source, ...)` call as `ref()`, the
-  declared type is readable there, and the relation in another schema can be described, with the
-  window rendering on the session clock - but the row-and-partition behaviour of a *source*-based
-  upstream across the type branches has not been run as a cell;
-- the cost of one metadata call per distinct relation per invocation on projects with many upstream
-  relations - cached, but not benchmarked. The cache lives as long as the dbt process: a model that
-  re-creates the *same* relation with a *different* event-column type inside one invocation would be
-  judged by the first answer. Nothing measured here covers that; dropping the cache (one describe per
-  boundary instead of per relation) is the alternative, at the cost of more metadata calls.
+- there is no declaration-only mode any more, so nothing is unmeasured about one: the unverifiable
+  branch refuses with or without a declaration, unit-pinned for both declared spellings and for an
+  ephemeral relation (a CTE name, which cannot be described at all). What is *not* measured on a live
+  project is the ephemeral shape specifically - the live probe used a missing upstream relation
+  instead: describe retried three times, the batch errored at ~30s, and the reason was the
+  unverifiable-clock message rather than a guess;
+- `source()`-based event-time upstreams are a committed cell now: a Shanghai session, a physically
+  `timestamp` table declared `timestamp_ntz` in its source properties, the same four rows and the same
+  per-step partition assertions as the `ref()` cells. Not run as a cell: the other type branches
+  (`timestamp_ntz`, `datetime`, `date`) and the other sessions behind a `source()`, and a source whose
+  relation is missing - which the rule refuses;
+- the metadata call per batch is not benchmarked on projects with many upstream relations; what is
+  pinned is that no answer is reused across decisions (unit cases: repeated renders ask again, a
+  recreated relation with a new type follows the new answer, a failed lookup does not poison the next
+  batch).

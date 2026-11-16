@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, tzinfo, timezone
-from typing import Dict, FrozenSet, Optional, Tuple, TypeVar
+from typing import Dict, FrozenSet, Optional, TypeVar
 
 from dbt.adapters.base.relation import BaseRelation, EventTimeFilter, InformationSchema
 from dbt.adapters.contracts.relation import RelationType, Path, Policy, RelationConfig
@@ -136,10 +136,6 @@ _INSTANT_BEARING_TYPES = frozenset(
 #: end: the next `insert overwrite` erases the rows the previous batch wrote).
 _NAIVE_TYPES = frozenset({"timestampntz"})
 
-#: The physical types of a relation are read once per invocation, keyed by its path. A column type
-#: cannot change underneath a run that is already in flight, and the window is decided per batch.
-_PHYSICAL_TYPE_CACHE: Dict[Tuple[Optional[str], Optional[str], Optional[str]], Dict[str, str]] = {}
-
 
 def normalize_column_type(raw_type: Optional[str]) -> str:
     """`TIMESTAMP_NTZ`, `timestamp ntz`, `timestamp-ntz` and `timestamp_ntz` are the same type.
@@ -194,11 +190,13 @@ def physical_column_types(relation: "MaxComputeRelation") -> Dict[str, str]:
     The declared type in a YAML property is *not* used here: measured on the real `ref()` path, a
     column physically `timestamp` was declared `timestamp_ntz`, and the declaration is the one that
     would have picked the wrong clock. `{}` means unverifiable - it does not mean naive.
+
+    Asked again on every render, and a failure is not remembered either. A memo keyed by
+    database/schema/identifier would be handed to the next invocation in the same process, and to a
+    batch whose upstream was dropped and rebuilt in between, carrying the old answer with no way to
+    know it had changed; a memo of the empty answer would keep a model refusing after the relation
+    appeared. One metadata call per decision is the price of an answer that cannot go stale.
     """
-    key = (relation.path.database, relation.path.schema, relation.path.identifier)
-    cached = _PHYSICAL_TYPE_CACHE.get(key)
-    if cached is not None:
-        return cached
     types: Dict[str, str] = {}
     try:
         from dbt.adapters.factory import get_adapter_by_type
@@ -211,11 +209,10 @@ def physical_column_types(relation: "MaxComputeRelation") -> Dict[str, str]:
             for column in columns
         }
     except Exception as exc:  # noqa: BLE001 - unverifiable is reported by the caller, not guessed
-        logger.debug(
+        logger.warning(
             "MaxCompute adapter: could not read the physical column types of %s (%s), so the "
             "microbatch window clock cannot be decided from the type." % (relation.render(), exc)
         )
-    _PHYSICAL_TYPE_CACHE[key] = types
     return types
 
 
@@ -382,12 +379,14 @@ class MaxComputeRelation(BaseRelation):
         return DbtRuntimeError(message)
 
     def _event_field_clock_kind(self, field_name: str) -> str:
-        """`instant` / `naive` / `unknown` - the field's own type, warehouse answer first.
+        """`instant` / `naive` / `unknown` - the field's type as the warehouse states it.
 
-        The physical type of the relation being read is the authority: it is what the server will
-        compare on. A YAML declaration is used only when that cannot be read, and `unknown` when
-        neither answers - which on a session whose clock differs from UTC is refused rather than
-        guessed either way.
+        The physical type of the relation being read is the only authority: it is what the server
+        will compare on. A YAML declaration does not pick the clock, not even when the physical
+        answer is missing - "the describe failed, so believe the property file" is the same
+        unverified guess that produced the original mismatch, only now stated in YAML. A declaration
+        that is present is named in the refusal, so the user can see what was declined; an
+        unverifiable window on a session that would move it is refused.
         """
         wanted = _unquoted_field_name(field_name)
         types = physical_column_types(self)
@@ -396,15 +395,23 @@ class MaxComputeRelation(BaseRelation):
                 return clock_kind_of(raw_type)
         if self.event_field_declared_type:
             logger.warning(
-                "MaxCompute adapter: the physical type of %r on %s could not be read, so the "
-                "microbatch window is decided from the declared type %r, which has not been "
-                "verified against the column."
+                "MaxCompute adapter: the physical type of %r on %s could not be read. The model "
+                "declares %r for it, but a declaration that has not been verified against the column "
+                "does not choose the clock, so this window is refused rather than guessed."
                 % (field_name, self.render(), self.event_field_declared_type)
             )
-            return clock_kind_of(self.event_field_declared_type)
         return "unknown"
 
     def _unverifiable_clock_message(self, field_name: str, boundary: datetime, text: str) -> str:
+        # The declaration is reported, never used: a describe failure is exactly when trusting it
+        # would decide a clock on an unverified answer.
+        declared = (
+            ""
+            if not self.event_field_declared_type
+            else " The model declares `data_type: %s` for this field; an unverified declaration does "
+            "not pick the clock, because that is the guess this change removes."
+            % self.event_field_declared_type
+        )
         return (
             "MaxCompute cannot tell which clock the microbatch window for %r belongs on. The batch "
             "boundary %s would read as '%s' on this session (`timezone: %s`), which is a different "
@@ -422,6 +429,7 @@ class MaxComputeRelation(BaseRelation):
                 options.local_timezone,
                 self.render(),
             )
+            + declared
         )
 
     def _empty_window_message(self, text: str) -> str:
