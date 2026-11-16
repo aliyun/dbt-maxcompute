@@ -205,16 +205,20 @@ class _DayWindowScenario:
                 }
             )
         if self.upstream == "source":
-            table = {"name": "src_events", "identifier": "input_model"}
-            # without an explicit schema the source resolves under the source's own name and the
-            # table is not found (ODPS-0130131); target.schema is the schema `input_model` was built in
-            table["schema"] = "{{ target.schema }}"
-            table["config"] = {"event_time": "event_time"}
+            table = {
+                "name": "src_events",
+                "identifier": "input_model",
+                "config": {"event_time": "event_time"},
+            }
             if self.declared_column_type:
                 table["columns"] = [{"name": "event_time", "data_type": self.declared_column_type}]
-            files["sources.yml"] = yaml.safe_dump(
-                {"version": 2, "sources": [{"name": "etl", "tables": [table]}]}
-            )
+            # `schema` goes on the source, not on the table. Measured by compiling three shapes on a
+            # real project: a table-level `schema` is ignored and the relation resolves under the
+            # source's own name (`etl`.`input_model`), which is not where the table was built - the
+            # describe then finds nothing and this branch refuses the batch for a reason that has
+            # nothing to do with the clock. `target.schema` is the schema `input_model` lives in.
+            source = {"name": "etl", "schema": "{{ target.schema }}", "tables": [table]}
+            files["sources.yml"] = yaml.safe_dump({"version": 2, "sources": [source]})
         return files
 
     @pytest.fixture(scope="class")
@@ -415,11 +419,15 @@ class TestMicrobatchFoldHourIsRefusedBeforeWriting:
 
     def test_the_fold_batch_is_refused_says_why_and_writes_nothing(self, project):
         run_dbt(["run", "--select", "input_model"])
-        # 2025-11-02 13:00Z-14:00Z is 09:00-10:00 on that wall clock, an ordinary hour: it writes a
-        # partition that the refused batch must not disturb.
-        _window("2025-11-02 13:00:00", "2025-11-02 14:00:00", select="microbatch_model")
+        # An ordinary hour well after the transition, to have something worth preserving: from 06:00Z
+        # that wall clock is on EST (UTC-5), so 14:00Z-15:00Z is 09:00-10:00 local and holds the 09:30
+        # row. (My first attempt here used 13:00Z-14:00Z and asserted the label the batch would get:
+        # 13:00Z is 08:00 EST, the window selected nothing, and the cell failed on its own arithmetic,
+        # not on the behaviour under test - so the labels are read back rather than assumed.)
+        _window("2025-11-02 14:00:00", "2025-11-02 15:00:00", select="microbatch_model")
         rows_before, partitions_before = _state_of(project, grain="hour")
-        assert rows_before == {1: "2025-11-02 09:00:00"}, rows_before
+        assert sorted(rows_before) == [1], rows_before
+        assert partitions_before, "the step above should have written a partition to preserve"
 
         logged = []
         # `expect_pass=False` is still the core assertion: if this degrades back to "warn and write
