@@ -50,6 +50,40 @@ def session_clock():
 
 
 @contextmanager
+def _asked_physical_answers(answers):
+    """Answer the *real* warehouse lookup from `answers`, one entry per call; an Exception is raised.
+
+    `_warehouse_types` patches `physical_column_types` away, which is right for clock questions but
+    cannot test the lookup itself. This one leaves it in place and patches only `dbt.adapters.factory`
+    underneath it, so whether an answer is remembered between renders - the thing a memo keyed by
+    relation path gets wrong - is what is actually under test.
+    """
+    asked = []
+    pending = list(answers)
+
+    class _Columns:
+        def __init__(self, dtype):
+            self.column, self.dtype = "event_time", dtype
+
+    class _StubAdapter:
+        def get_columns_in_relation(self, relation):
+            asked.append(relation.identifier)
+            answer = pending.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return [_Columns(answer)]
+
+    class _StubFactory:
+        @staticmethod
+        def get_adapter_by_type(name):
+            assert name == "maxcompute"
+            return _StubAdapter()
+
+    with mock.patch.dict("sys.modules", {"dbt.adapters.factory": _StubFactory}):
+        yield asked
+
+
+@contextmanager
 def _warehouse_types(types):
     """State what the warehouse would answer for this relation's columns.
 
@@ -290,23 +324,33 @@ class TestWhichTypeDecidesTheClock:
             "2025-05-01 00:00:00", "2025-05-02 00:00:00"
         )
 
-    def test_the_declaration_is_used_only_when_the_warehouse_cannot_answer(self, session_clock):
-        """Physical `timestamp` declared `timestamp_ntz` gets the shift: the warehouse outranks YAML.
+    def test_the_warehouse_outranks_yaml_and_yaml_alone_decides_nothing(self, session_clock):
+        """The physical answer wins where it exists; where it does not, YAML is not consulted either.
 
         Measured pair on the real path - an upstream column that is physically `timestamp` declared
         `timestamp_ntz` in its property file, on a Shanghai session. Trusting the declaration would
         have skipped the shift and reproduced the row loss this branch exists to fix.
+
+        The mirror case is a declaration with no physical answer behind it (review point 1): a
+        describe that failed leaves exactly the same unverified guess, only stated in YAML. Declared
+        `timestamp` would shift a naive column into its neighbour's partition, declared
+        `timestamp_ntz` would leave an instant-bearing column unshifted - both are the documented
+        unsafe choices, so both are refused and the message says which declaration was declined.
         """
         options.local_timezone = "Asia/Shanghai"
         assert _render(column_type="timestamp", declared_type="timestamp_ntz") == _window(
             "2025-05-01 08:00:00", "2025-05-02 08:00:00"
         )
-        assert _render(column_type=None, declared_type="timestamp_ntz") == _window(
+        assert _render(column_type="timestamp_ntz", declared_type="timestamp") == _window(
             "2025-05-01 00:00:00", "2025-05-02 00:00:00"
         )
-        assert _render(column_type=None, declared_type="timestamp") == _window(
-            "2025-05-01 08:00:00", "2025-05-02 08:00:00"
-        )
+        for claimed in ("timestamp", "timestamp_ntz"):
+            with pytest.raises(DbtRuntimeError) as refused:
+                _render(column_type=None, declared_type=claimed)
+            message = str(refused.value)
+            assert f"declares `data_type: {claimed}`" in message
+            assert "unverified declaration" in message
+            assert "window is empty" not in message
 
     def test_an_unverifiable_field_is_refused_on_a_session_that_would_move_it(self, session_clock):
         options.local_timezone = "Asia/Shanghai"
@@ -316,6 +360,7 @@ class TestWhichTypeDecidesTheClock:
         assert "could not be read" in message
         assert "Asia/Shanghai" in message
         assert "guessed" in message
+        assert "declares" not in message  # nothing was declared, so nothing is being declined
 
     def test_the_same_unverifiable_field_is_fine_on_a_utc_session(self, session_clock):
         """Nothing is being chosen on a UTC session: both readings are the same text, so no refusal."""
@@ -345,7 +390,7 @@ class TestWhichTypeDecidesTheClock:
             "2025-05-01 00:00:00", "2025-05-02 00:00:00", field="`Event Time`"
         )
 
-    def test_an_ephemeral_upstream_falls_to_the_declaration_or_refuses(self, session_clock):
+    def test_an_ephemeral_upstream_is_refused_with_or_without_a_declaration(self, session_clock):
         """A CTE has no relation to describe, so the physical answer cannot be read at all.
 
         `ref()`ing an ephemeral model between the event column and the microbatch model is the one
@@ -369,64 +414,93 @@ class TestWhichTypeDecidesTheClock:
         assert declared_event_field_type(_Node(), "event_time") == "timestamp"
         assert declared_event_field_type(_BareNode(), "event_time") is None
 
+        window = EventTimeFilter(field_name="event_time", start=UTC_DAY_START, end=UTC_DAY_END)
         options.local_timezone = "Asia/Shanghai"
-        relation = MaxComputeRelation.create(
+        declared = MaxComputeRelation.create(
             identifier="__dbt__cte__stg_events", event_field_declared_type="timestamp"
         )
+        bare = MaxComputeRelation.create(identifier="__dbt__cte__stg_events")
         with _warehouse_types({}):  # nothing to describe: an ephemeral CTE
-            assert relation._render_event_time_filtered(
-                EventTimeFilter(field_name="event_time", start=UTC_DAY_START, end=UTC_DAY_END)
-            ) == _window("2025-05-01 08:00:00", "2025-05-02 08:00:00")
-            bare = MaxComputeRelation.create(identifier="__dbt__cte__stg_events")
-            with pytest.raises(DbtRuntimeError) as refused:
-                bare._render_event_time_filtered(
-                    EventTimeFilter(field_name="event_time", start=UTC_DAY_START, end=UTC_DAY_END)
-                )
-        assert "could not be read" in str(refused.value)
+            for relation, claim in ((declared, "timestamp"), (bare, None)):
+                with pytest.raises(DbtRuntimeError) as refused:
+                    relation._render_event_time_filtered(window)
+                message = str(refused.value)
+                assert "could not be read" in message
+                assert (f"declares `data_type: {claim}`" in message) is (claim is not None)
+            # a session that moves nothing still needs nothing verified: the text is dbt-core's own
+            options.local_timezone = False
+            assert declared._render_event_time_filtered(window) == _window(
+                "2025-05-01 00:00:00", "2025-05-02 00:00:00"
+            )
 
-    def test_the_type_answer_is_read_once_per_relation_per_invocation(self, session_clock):
-        """One metadata call per distinct relation, not one per batch boundary or per render.
+    def test_every_render_asks_the_warehouse_again(self, session_clock):
+        """No memo across renders: the answer that decides a clock is read when it is needed.
 
-        The window is decided twice per batch (both boundaries) and a run has many batches, while a
-        column type cannot change underneath a run that is already in flight.
+        Three renders of the same relation, three lookups. The window is decided per batch and a run
+        has many batches, so this is the cost - one metadata call per decision - and it buys the fact
+        that no decision can be made on an answer that has since become wrong.
         """
-        asked = []
-
-        class _Columns:
-            def __init__(self, name, dtype):
-                self.column, self.dtype = name, dtype
-
-        class _StubAdapter:
-            def get_columns_in_relation(self, relation):
-                asked.append(relation.identifier)
-                return [_Columns("event_time", "timestamp")]
-
-        class _StubFactory:
-            @staticmethod
-            def get_adapter_by_type(name):
-                assert name == "maxcompute"
-                return _StubAdapter()
-
         options.local_timezone = "Asia/Shanghai"
-        relation_module._PHYSICAL_TYPE_CACHE.clear()
         relation = MaxComputeRelation.create(database="proj", schema="sch", identifier="up_stream")
-        with mock.patch.dict("sys.modules", {"dbt.adapters.factory": _StubFactory}):
-            for index in range(3):
-                relation._render_event_time_filtered(
-                    EventTimeFilter(
-                        field_name="event_time",
-                        start=datetime(2025, 5, 1 + index, tzinfo=pytz.UTC),
-                        end=datetime(2025, 5, 2 + index, tzinfo=pytz.UTC),
-                    )
-                )
-            other = MaxComputeRelation.create(
-                database="proj", schema="sch", identifier="other_stream"
+        window = EventTimeFilter(field_name="event_time", start=UTC_DAY_START, end=UTC_DAY_END)
+        with _asked_physical_answers(["timestamp", "timestamp_ntz", "timestamp"]) as asked:
+            first = relation._render_event_time_filtered(window)
+            second = relation._render_event_time_filtered(window)
+            third = relation._render_event_time_filtered(window)
+        assert asked == ["up_stream"] * 3, asked
+        assert first == _window("2025-05-01 08:00:00", "2025-05-02 08:00:00")
+        assert second == _window("2025-05-01 00:00:00", "2025-05-02 00:00:00")
+        assert third == _window("2025-05-01 08:00:00", "2025-05-02 08:00:00")
+
+    def test_a_relation_recreated_with_another_type_is_not_rendered_on_the_old_answer(
+        self, session_clock
+    ):
+        """The path is the same, the column type is not: an upstream rebuilt between two batches.
+
+        Measured with the lookup itself in play - the review pointed at a memo keyed by
+        database/schema/identifier, which is exactly what cannot tell these two runs apart.
+        """
+        options.local_timezone = "Asia/Shanghai"
+        relation = MaxComputeRelation.create(database="proj", schema="sch", identifier="up_stream")
+        window = EventTimeFilter(field_name="event_time", start=UTC_DAY_START, end=UTC_DAY_END)
+        with _asked_physical_answers(["timestamp", "timestamp_ntz"]):
+            before = relation._render_event_time_filtered(window)
+        with _asked_physical_answers(["timestamp_ntz"]):
+            after = relation._render_event_time_filtered(window)
+        assert before == _window("2025-05-01 08:00:00", "2025-05-02 08:00:00")
+        assert after == _window("2025-05-01 00:00:00", "2025-05-02 00:00:00")
+
+    def test_a_failed_lookup_is_not_remembered_as_a_refusal(self, session_clock):
+        """A describe that blew up once must not decide the next batch either.
+
+        First call raises (connection gone), so this batch is refused; the next call answers, and that
+        batch is rendered on the answer. Caching the empty result would have kept the model refusing
+        for the rest of the process, which is a different outage than the one being guarded against.
+        """
+        options.local_timezone = "Asia/Shanghai"
+        relation = MaxComputeRelation.create(database="proj", schema="sch", identifier="up_stream")
+        window = EventTimeFilter(field_name="event_time", start=UTC_DAY_START, end=UTC_DAY_END)
+        with _asked_physical_answers([ConnectionError("describe failed"), "timestamp"]):
+            with pytest.raises(DbtRuntimeError) as refused:
+                relation._render_event_time_filtered(window)
+            assert "could not be read" in str(refused.value)
+            assert relation._render_event_time_filtered(window) == _window(
+                "2025-05-01 08:00:00", "2025-05-02 08:00:00"
             )
-            other._render_event_time_filtered(
-                EventTimeFilter(field_name="event_time", start=UTC_DAY_START, end=UTC_DAY_END)
+
+    def test_two_relations_do_not_share_one_answer(self, session_clock):
+        options.local_timezone = "Asia/Shanghai"
+        window = EventTimeFilter(field_name="event_time", start=UTC_DAY_START, end=UTC_DAY_END)
+        left = MaxComputeRelation.create(database="proj", schema="sch", identifier="left_stream")
+        right = MaxComputeRelation.create(database="proj", schema="sch", identifier="right_stream")
+        with _asked_physical_answers(["timestamp", "timestamp_ntz"]) as asked:
+            assert left._render_event_time_filtered(window) == _window(
+                "2025-05-01 08:00:00", "2025-05-02 08:00:00"
             )
-        assert asked == ["up_stream", "other_stream"], asked
-        relation_module._PHYSICAL_TYPE_CACHE.clear()
+            assert right._render_event_time_filtered(window) == _window(
+                "2025-05-01 00:00:00", "2025-05-02 00:00:00"
+            )
+        assert asked == ["left_stream", "right_stream"], asked
 
 
 class TestAnEmptyWindowIsRefusedAndNamedAsWhatItIs:
@@ -496,20 +570,20 @@ class TestAnEmptyWindowIsRefusedAndNamedAsWhatItIs:
         _render()  # an ordinary aligned window on a shifted session
         assert logged == []
 
-    def test_a_declared_type_used_as_fallback_is_said_at_warning_level(
+    def test_a_declaration_that_is_declined_is_said_at_warning_level(
         self, session_clock, monkeypatch
     ):
-        """The fallback is unverified, and 'debug' is not where an unverified decision belongs."""
+        """Silently refusing to use a declaration would read as a broken adapter; say it instead."""
         logged = []
         monkeypatch.setattr(
             relation_module.logger, "warning", lambda message: logged.append(str(message))
         )
         options.local_timezone = "Asia/Shanghai"
-        assert _render(column_type=None, declared_type="timestamp") == _window(
-            "2025-05-01 08:00:00", "2025-05-02 08:00:00"
-        )
+        with pytest.raises(DbtRuntimeError):
+            _render(column_type=None, declared_type="timestamp")
         assert len(logged) == 1
-        assert "has not been verified against the column" in logged[0]
+        assert "declares 'timestamp' for it" in logged[0]
+        assert "does not choose the clock" in logged[0]
 
     def test_the_fold_branch_still_fires_for_two_distinct_instants(self, session_clock):
         """Positive control: same collapsed text, different instants - and a different message.

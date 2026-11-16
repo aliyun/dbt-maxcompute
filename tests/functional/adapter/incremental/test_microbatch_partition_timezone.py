@@ -56,7 +56,8 @@ def _input_sql(event_type, mode="epoch"):
     so a window moved by the session offset moves the rows by the same amount and the two shifts
     would cancel out - the cell would pass whether or not the rendering was aligned.
     `literal` is what a naive column needs: it has no clock to interpret an instant through, so the
-    text *is* the value, and 09:00/15:00 sit inside their own day on every session this file runs.
+    text *is* the value - and the times straddle the shift, so a wrongly moved window misplaces them
+    instead of collecting them in the batch they came from.
     """
     if mode == "literal":
         rows = "\nunion all\n".join(
@@ -71,7 +72,10 @@ def _input_sql(event_type, mode="epoch"):
     return "{{ config(materialized='table', event_time='event_time') }}\n" + rows + "\n"
 
 
-def _model_sql(event_type):
+def _model_sql(event_type, upstream="ref"):
+    source = (
+        "{{ ref('input_model') }}" if upstream == "ref" else "{{ source('etl', 'src_events') }}"
+    )
     return (
         "{{ config(\n"
         "    materialized='incremental',\n"
@@ -83,17 +87,22 @@ def _model_sql(event_type):
         f"    partition_by={{'field': 'event_time', 'data_type': '{event_type}', "
         "'granularity': 'day'}\n"
         ") }}\n"
-        "select id, event_time from {{ ref('input_model') }}\n"
+        f"select id, event_time from {source}\n"
     )
 
 
-# 09:00 and 15:00 on each of the two batch days, as written. Used by the naive-type cells, where an
-# instant would be read through the session clock and land in a different day than its batch.
+# 01:00 and 23:00 on each of the two batch days, as written. These are the naive cells' fixtures, and
+# the times are picked to *straddle* the shift they have to detect, not to hide from it: a naive
+# column is compared as written, so a window wrongly moved by +08:00 puts 01:00 before the batch and
+# sweeps 05-02's 01:00 into the previous batch - the per-step assertions below stop holding.
+# 09:00/15:00 were here first, and both of those sit inside `[00:00, 00:00)` and the wrong
+# `[08:00, 08:00)` alike, so those cells stayed green with the original row loss (red/green pair
+# measured in this file's sibling evidence: forcing the shift fails them, the shipped renderer passes).
 _LITERALS = (
-    "2025-05-01 09:00:00",
-    "2025-05-01 15:00:00",
-    "2025-05-02 09:00:00",
-    "2025-05-02 15:00:00",
+    "2025-05-01 01:00:00",
+    "2025-05-01 23:00:00",
+    "2025-05-02 01:00:00",
+    "2025-05-02 23:00:00",
 )
 
 # Where every row has to end up, checked after each step and not only at the end: a window that
@@ -132,6 +141,19 @@ def _partition_of(project):
     return per_row, sorted(p.name for p in table.partitions)
 
 
+def _state_of(project, grain="day"):
+    """`{id: partition label}` plus the table's partition list, at the grain the model is cut on."""
+    rows = project.run_sql(
+        f"select id, trunc_time(event_time, '{grain}') as part from {_relation(project)} order by id",
+        fetch="all",
+    )
+    per_row = {int(row[0]): str(row[1])[:19] for row in rows or []}
+    table = project.adapter.get_odps_client().get_table(
+        "microbatch_model", schema=project.test_schema
+    )
+    return per_row, sorted(p.name for p in table.partitions)
+
+
 def _window(start, end, select=None):
     args = ["run", "--event-time-start", start, "--event-time-end", end]
     if select is not None:
@@ -153,14 +175,22 @@ class _DayWindowScenario:
     event_column_type = "timestamp"
     declared_column_type = None
     input_mode = "epoch"
+    # `ref` (the model reads a model dbt built in this run) or `source` (it reads a relation dbt did
+    # not build). dbt-core hands those two to the adapter at different call sites, so both need the
+    # same answer; `TestMicrobatchSourceUpstreamOnShiftedSession` is the `source` variant.
+    upstream = "ref"
+    # `None` lets the first step run the whole project, which is how the upstream model gets built.
+    # A `source` upstream is not a dependency edge, so that cell builds the table itself and pins the
+    # batch steps to the model - otherwise the run order between the two is dbt's choice.
+    batch_select = None
 
     @pytest.fixture(scope="class")
     def models(self):
         files = {
             "input_model.sql": _input_sql(self.event_column_type, mode=self.input_mode),
-            "microbatch_model.sql": _model_sql(self.event_column_type),
+            "microbatch_model.sql": _model_sql(self.event_column_type, self.upstream),
         }
-        if self.declared_column_type:
+        if self.declared_column_type and self.upstream == "ref":
             files["schema.yml"] = yaml.safe_dump(
                 {
                     "version": 2,
@@ -173,6 +203,17 @@ class _DayWindowScenario:
                         }
                     ],
                 }
+            )
+        if self.upstream == "source":
+            table = {"name": "src_events", "identifier": "input_model"}
+            # without an explicit schema the source resolves under the source's own name and the
+            # table is not found (ODPS-0130131); target.schema is the schema `input_model` was built in
+            table["schema"] = "{{ target.schema }}"
+            table["config"] = {"event_time": "event_time"}
+            if self.declared_column_type:
+                table["columns"] = [{"name": "event_time", "data_type": self.declared_column_type}]
+            files["sources.yml"] = yaml.safe_dump(
+                {"version": 2, "sources": [{"name": "etl", "tables": [table]}]}
             )
         return files
 
@@ -209,7 +250,7 @@ class _DayWindowScenario:
         return {row_id: day[:10] for row_id, day in per_row.items()}
 
     def test_adjacent_day_windows_never_lose_or_duplicate_rows(self, project):
-        _window(*DAY1)
+        _window(*DAY1, select=self.batch_select)
         assert _ids(project) == [1, 2], "the first window writes its own rows"
         per_row, partitions = _partition_of(project)
         assert len(partitions) == 1, f"one day window must touch one partition: {partitions}"
@@ -325,7 +366,10 @@ class TestMicrobatchFoldHourIsRefusedBeforeWriting:
     folded hour is covered by a neighbour depends on the zone (measured: New York resolves the
     repeated text to the earlier instant, Sydney to the later one, so in Sydney no batch covers it).
     `tests/unit/test_microbatch_session_clock.py` pins the message and both zones; this pins the part
-    only a run can show - that the model does not come back green.
+    only a run can show - that a real batch is refused, that it is refused *for that reason*, and that
+    the partition the model had already written is untouched. `expect_pass=False` alone would also be
+    satisfied by an unrelated metadata or SQL failure, so the logged reason and the unchanged target
+    are asserted too, and the batch that runs before it gives the assertion something to preserve.
     """
 
     profile_timezone = "America/New_York"
@@ -369,9 +413,16 @@ class TestMicrobatchFoldHourIsRefusedBeforeWriting:
         finally:
             options.local_timezone = saved
 
-    def test_the_fold_batch_errors_instead_of_reporting_success(self, project):
+    def test_the_fold_batch_is_refused_says_why_and_writes_nothing(self, project):
         run_dbt(["run", "--select", "input_model"])
-        # `expect_pass=False` is the assertion: if this ever degrades back to "warn and write
+        # 2025-11-02 13:00Z-14:00Z is 09:00-10:00 on that wall clock, an ordinary hour: it writes a
+        # partition that the refused batch must not disturb.
+        _window("2025-11-02 13:00:00", "2025-11-02 14:00:00", select="microbatch_model")
+        rows_before, partitions_before = _state_of(project, grain="hour")
+        assert rows_before == {1: "2025-11-02 09:00:00"}, rows_before
+
+        logged = []
+        # `expect_pass=False` is still the core assertion: if this degrades back to "warn and write
         # nothing", the run passes and this cell fails.
         run_dbt(
             [
@@ -384,7 +435,127 @@ class TestMicrobatchFoldHourIsRefusedBeforeWriting:
                 "2025-11-02 06:00:00",
             ],
             expect_pass=False,
+            callbacks=[lambda event: logged.append(str(getattr(event.info, "msg", "")))],
         )
+        text = "\n".join(logged)
+        assert "daylight-saving fold" in text, text[-2000:]
+        assert "2025-11-02 01:00:00" in text, text[-2000:]
+        # two distinct instants that read the same: a fold, and not the other collapsed-window case
+        assert "window is empty" not in text
+        rows_after, partitions_after = _state_of(project, grain="hour")
+        assert rows_after == rows_before, f"a refused batch writes nothing: {rows_after}"
+        assert (
+            partitions_after == partitions_before
+        ), f"a refused batch opens no partition: {partitions_after}"
+
+
+class TestMicrobatchSourceUpstreamOnShiftedSession(_DayWindowScenario):
+    """The event rows come from a `source()`, not a `ref()`, on a session that has to be shifted.
+
+    dbt-core builds the window at two call sites: `ref()` hands over the target model built in this
+    run, a `source()` hands over a relation dbt never created. The type that decides the clock is the
+    physical column of the relation being read in both cases - which the shipped rule can only answer
+    if it consults the warehouse for the source too. The source here *declares* `timestamp_ntz` over
+    a physically `timestamp` column: the declaration is what a YAML-driven guard would have trusted,
+    and the answer that keeps the rows is the warehouse's.
+
+    Same four rows, same session, same shared expectations as the `ref()` cells.
+    """
+
+    profile_timezone = "Asia/Shanghai"
+    event_column_type = "timestamp"
+    declared_column_type = "timestamp_ntz"
+    upstream = "source"
+    batch_select = "microbatch_model"
+
+    @pytest.fixture(scope="class", autouse=True)
+    def _build_the_source_table(self, project):
+        """A source is not a dependency edge: create the relation before any batch runs.
+
+        Otherwise dbt may schedule the microbatch model first, the source's table would not exist to
+        be described, and the refusal would be correct but for the wrong reason.
+        """
+        return run_dbt(["run", "--select", "input_model"])
+
+
+class TestMicrobatchEphemeralUpstreamIsRefusedOnShiftedSession:
+    """An ephemeral model in between: the review asked for that shape compiled, not mocked.
+
+    `ref()`ing an ephemeral model inlines it as a CTE, so the relation the window is rendered onto is
+    `__dbt__cte__...` - there is nothing in the warehouse to describe, and the unit cases that pin the
+    lookup cannot show that the shape reaches the renderer at all. On a session that would move the
+    text the batch is refused and the reason is the unverifiable-clock message; the same model on the
+    default UTC session needs no answer from the warehouse, which is the unit case beside this one.
+    """
+
+    profile_timezone = "Asia/Shanghai"
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        # `event_time` on the upstream is what makes Core build a window at all
+        # (`resolve_event_time_filter`); ephemeral is not a special case there.
+        upstream = (
+            "{{ config(materialized='ephemeral', event_time='event_time') }}\n"
+            "select 1 as id, cast(from_unixtime(1746061200) as timestamp) as event_time\n"
+        )
+        model_sql = (
+            "{{ config(\n"
+            "    materialized='incremental',\n"
+            "    incremental_strategy='microbatch',\n"
+            "    unique_key='id',\n"
+            "    event_time='event_time',\n"
+            "    batch_size='day',\n"
+            "    begin=modules.datetime.datetime(2025, 5, 1, 0, 0, 0),\n"
+            "    partition_by={'field': 'event_time', 'data_type': 'timestamp', "
+            "'granularity': 'day'}\n"
+            ") }}\n"
+            "select id, event_time from {{ ref('stg_events') }}\n"
+        )
+        return {"stg_events.sql": upstream, "microbatch_model.sql": model_sql}
+
+    @pytest.fixture(scope="class")
+    def dbt_profile_target(self):
+        from odps import options
+
+        filepath = os.environ.get("DBT_PROFILE_PATH")
+        if not filepath:
+            pytest.skip("needs a real MaxCompute profile via DBT_PROFILE_PATH")
+        saved = options.local_timezone
+        with open(filepath) as handle:
+            target = yaml.safe_load(handle)
+        target["timezone"] = self.profile_timezone
+        try:
+            yield target
+        finally:
+            options.local_timezone = saved
+
+    def test_an_ephemeral_upstream_is_refused_and_says_the_type_is_unverified(self, project):
+        logged = []
+        run_dbt(
+            [
+                "run",
+                "--select",
+                "microbatch_model",
+                "--event-time-start",
+                "2025-05-01",
+                "--event-time-end",
+                "2025-05-02",
+            ],
+            expect_pass=False,
+            callbacks=[lambda event: logged.append(str(getattr(event.info, "msg", "")))],
+        )
+        text = "\n".join(logged)
+        assert "could not be read" in text, text[-2000:]
+        assert "daylight-saving fold" not in text
+        built = {
+            relation.identifier
+            for relation in project.adapter.list_relations_without_caching(
+                project.adapter.Relation.create(
+                    database=project.database, schema=project.test_schema
+                )
+            )
+        }
+        assert "microbatch_model" not in built, f"a refused batch writes nothing: {built}"
 
 
 class TestMicrobatchDatetimeColumnOnShiftedSession(_DayWindowScenario):
