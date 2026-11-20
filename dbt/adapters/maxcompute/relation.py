@@ -169,10 +169,11 @@ def _unquoted_field_name(field_name: str) -> str:
 def declared_event_field_type(relation_config: RelationConfig, field_name: str) -> Optional[str]:
     """The type this model's YAML property declares for the event field, when it declares one.
 
-    A *fallback*, not the authority: measured on the real `ref()` path, an upstream column that is
-    physically `timestamp` is declared `timestamp_ntz` in YAML, and the declaration picks the wrong
-    clock. It is used only when the warehouse cannot be asked (a relation that does not exist yet,
-    a connection that cannot describe it), and the run says so in the debug log.
+    Diagnostic only - not the authority, and not a fallback either. Measured on the real `ref()` path,
+    an upstream column that is physically `timestamp` was declared `timestamp_ntz` in YAML, so the
+    declaration is exactly the thing that picks the wrong clock; when the warehouse cannot be asked
+    there is no second authority to defer to, and the batch is refused instead (see
+    `_event_field_clock_kind`). It travels this far so a refusal can name the claim it declined.
     """
     wanted = _unquoted_field_name(field_name)
     columns = getattr(relation_config, "columns", None)
@@ -226,9 +227,10 @@ class MaxComputeRelation(BaseRelation):
         return self.quote(False, False, False)
 
     include_policy: Policy = field(default_factory=lambda: OdpsIncludePolicy())
-    # What the YAML property declares for the filtered event field, carried here because the
-    # warehouse's own answer (`physical_column_types`) is the authority and this is only the
-    # fallback when the warehouse cannot be asked. See `create_from`.
+    # What the YAML property declares for the filtered event field, carried here so a refusal can
+    # name the declaration it declined. The warehouse's own answer (`physical_column_types`) is the
+    # only authority on which clock the window belongs to; this one never chooses a clock.
+    # See `create_from`.
     event_field_declared_type: Optional[str] = None
 
     renameable_relations: FrozenSet[RelationType] = field(

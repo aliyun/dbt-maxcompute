@@ -205,7 +205,7 @@ any window and reported success (a separate limitation, still out of scope here 
 that it is no longer silent), and for a naive column with no readable type the run used to pick the
 shifted reading by default. And deciding the clock costs a metadata call per batch per relation being
 filtered - a model read by ten daily batches is described ten times - because an answer that could
-be stale would decide the wrong clock, which is the failure this file is about. The 9-cell live run
+be stale would decide the wrong clock, which is the failure this file is about. The ten-cell live run
 in `tests/functional/adapter/incremental/test_microbatch_partition_timezone.py` is the only cost
 measurement here; it is not a benchmark of projects with many upstream relations.
 
