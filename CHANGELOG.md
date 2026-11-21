@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.12.1b1 — 2026-10-26 (preview)
+
+- Add adapter-owned `dbt run-operation dbt_maxcompute.export_semantic_package`, optional `semantic` conversion dependencies and a Chinese guide. Read dbt manifests and live schemas through the public maxc JSON interface; write only local revision-bound proposals.
+
+
 All notable changes to `dbt-maxcompute` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -7,8 +12,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-10-22
+
+### Fixed
+
+- Reject Python function `overloads` before uploading resources or updating the
+  root function, preventing dbt Core 1.12 from silently replacing a previously
+  deployed signature.
+
+### Changed
+
+- Declare dbt Core 1.12 compatibility while retaining the tested 1.11
+  combinations and the existing minimum requirement of Core 1.11.2.
+- Test dbt Core 1.11.2, 1.11.16 and 1.12.6 explicitly in CI; pin the shared
+  adapter/fixture dependencies and document the verified compatibility scope.
+- Add live regressions for overload rejection without remote changes,
+  `seed --empty`, `run-operation --sql` and latest-version pointer views.
+
+## [1.11.5] — 2026-10-22
+
+### Fixed
+
+- `truncate_insert` full-refresh no longer rejects the old target because it is
+  a view, external table, or partitioned table. View-to-table migration again
+  follows the shared rebuild path. Ordinary incremental runs still validate
+  overwrite targets; new model partition and predicate restrictions remain.
+  Full-refresh replaces the target object and does not preserve its grants.
+
+## [1.11.4] — 2026-10-19
+
+### Changed
+
+- `truncate_insert` now supports full-refresh through the existing incremental
+  rebuild path, allowing schema changes that require recreating the target.
+  Normal runs and models configured with `full_refresh=false` still preserve
+  the table object. Full-refresh replaces the object and does not guarantee
+  preservation of its Label grants.
+
+## [1.11.3] — 2026-10-15
+
 ### Added
 
+- MaxFrame Python table/incremental models and Python scalar/aggregate UDFs
+  graduate to Generally Available within their documented supported scope.
+  Existing limitations, including remote MaxFrame DAG cancellation, remain.
+- Opt-in `truncate_insert` incremental strategy replaces all rows in a
+  non-partitioned target with one `INSERT OVERWRITE`, preserving the target
+  table object. Existing strategies and their full-refresh behavior are unchanged.
+  Existing project/package macro overrides keep their own validation and behavior.
 - SQL integration regression entry point: `scripts/run-integration-tests.sh`
   runs a minimal real-SQL set (table, view, incremental, dbt tests, persisted
   docs) plus an invalid-SQL case that must fail, and verifies that every test
@@ -25,8 +76,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after the metadata retries; dbt-core records the failure in `catalog.json`
   `errors`, making the gap visible to consumers of the artifact.
 
+### Upgrade notes
+
+- SQL continues to default `odps.sql.python.version` to `cp311`, as in the
+  `1.11.3` beta releases. Upgrading from a beta preserves the runtime default
+  for both dbt function references and functions called by raw SQL name.
+- When upgrading from `1.11.2`, which did not set this hint globally, models
+  calling legacy CPython 2.7 or 3.7 UDFs must explicitly set
+  `sql_hints={'odps.sql.python.version': 'cp27'}` or `cp37`, respectively.
+  Hooks that invoke a legacy UDF must include the corresponding `SET` in
+  their own SQL statement. A single statement cannot mix Python runtimes.
+
 ### Fixed
 
+- Incremental materializations now execute hooks configured with
+  `transaction: false`, rather than silently skipping them.
+- Incremental column widening preserves MaxCompute column type details and
+  validates the widening plan before changing the target schema.
+- Snapshots validate that an existing target can retain history before
+  submitting a merge, and preserve the snapshot key columns.
+- The optional `[maxframe]` installation now constrains PyArrow below 26 to match
+  MaxFrame 2.x's NumPy 1 requirement. PyArrow 26 could install successfully but fail
+  to import, causing `dbt seed` to report that PyArrow was missing. CI now checks
+  the built wheel with the extra installed and initializes the PyODPS Arrow writer.
 - Functional tests without credentials are now reported as *skipped* with the
   reason, instead of failing with a missing-file error inside the profile
   fixture.
@@ -43,12 +115,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   00:00:00+00:00'`); MaxCompute compares that against `timestamp` columns but
   refuses it for `datetime` ones, whose string form is `yyyy-mm-dd hh:mi:ss`
   exactly, so every batch failed while the physical plan was generated. The
-  boundary is now stated without the offset suffix - and only where the session
-  clock reads UTC, so the window denotes the same instant. Sessions pinned to
-  another zone are untouched, and microseconds are kept rather than rounded:
-  a `datetime` column rejects fractional seconds too, so a `--sample` window
-  against one still fails to compile instead of silently changing the window.
-  See `docs/microbatch-support.md`.
+  boundary is now stated without the offset suffix, and microseconds are kept
+  rather than rounded: a `datetime` column rejects fractional seconds too, so a
+  `--sample` window against one still fails to compile instead of silently
+  changing the window. See `docs/microbatch-support.md`.
+- Microbatch models on a profile that pins a non-UTC `timezone` no longer lose
+  rows between adjacent batches. MaxCompute parses a timestamp string on the
+  session timezone while the batch's partitions come from `trunc_time()`, which
+  cuts UTC, so a `timezone: Asia/Shanghai` profile shifted every window eight
+  hours into its neighbour's partition and the later `insert overwrite` erased
+  rows the earlier batch had written - with the run reporting success. The
+  boundary is now stated as the session's own reading of the same instant, so
+  the window and the partition key are cut by one clock - for the event columns
+  that have a clock at all. The rest of the rule, and the two behaviour changes
+  it carries:
+  * a `timestamp_ntz` event column is compared as written, so its window stays
+    on the UTC reading; shifting it would move rows into the neighbouring
+    batch and give such a model the very failure this fixes (measured end to
+    end before narrowing the rule);
+  * the type used is the column's **physical** type on the relation being read,
+    not the type a YAML property declares - measured both ways, a declaration
+    that disagrees with the column picks the wrong clock in both directions.
+    The declaration is a fallback for when the warehouse cannot be asked;
+  * on a non-UTC session, a batch whose window cannot be stated on a verifiable
+    type now fails instead of guessing, as does a batch whose two boundaries
+    collapse to the same wall clock inside a daylight-saving fold - both used to
+    select no rows and report success. `date` event columns fall in the first
+    group: still a separate limitation, but no longer a silent one.
+  Where this cannot state the session clock at all (nothing pinned, a value that
+  is not a zone name, or a name the host cannot resolve) the window is left
+  exactly as dbt-core rendered it.
 
 - Microbatch **SQL** models that declare their event column as a `date` partition field are now
   refused at compile time instead of running empty; MaxFrame Python models are left alone,

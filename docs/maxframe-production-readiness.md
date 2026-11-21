@@ -1,9 +1,10 @@
 # MaxFrame production readiness
 
-MaxFrame Python models are **Production Preview**. They are suitable for
-selected production workloads after the project has passed the gates below.
-They are not yet Generally Available because dbt interruption is not fully
-propagated to an active remote MaxFrame DAG.
+MaxFrame Python models are **Generally Available** starting with `1.11.3`
+within their documented supported scope. Validate each production project's
+quota, dependencies, and permission model with the gates below. dbt
+interruption is not fully propagated to an active remote MaxFrame DAG; this
+remains a known operational limitation.
 
 ## Release gates
 
@@ -59,6 +60,6 @@ were deleted after semantic verification.
 ## Promotion decision
 
 A project can proceed when all six release gates pass with its own quota,
-runtime image, dependencies, data volume, and permission model. Keep the
-feature at Production Preview until remote DAG cancellation is confirmed for
-dbt interruption and forced worker termination paths.
+runtime image, dependencies, data volume, and permission model. Operational
+procedures must account for an active remote DAG continuing after dbt
+interruption or forced worker termination.

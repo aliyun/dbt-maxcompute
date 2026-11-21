@@ -1,7 +1,7 @@
 # MaxFrame Python Models
 
-> **Status: Production Preview (`1.11.3b3`).** Suitable for selected production
-> workloads after reviewing the limitations and operational guidance below.
+> **Status: Generally Available (`1.11.3`).** Supported for production workloads
+> within the scope, limitations, and operational guidance below.
 
 Release owners should also run the
 [production readiness gates](maxframe-production-readiness.md) against their

@@ -13,6 +13,18 @@
 Welcome to the **dbt-maxCompute** repository! This project aims to extend the capabilities of **dbt** (data build tool)
 for users of Alibaba MaxCompute, a cutting-edge data processing platform.
 
+## 用 Agent 把业务口径发布为 MaxCompute 语义包（试用）
+
+让 Agent 根据业务需求编写 dbt 指标、时间维度和关联配置，经过数据验证与差异审阅后，保存为 MaxCompute 中的 Published 语义包，供具备读取能力的 MaxAgent 分析会话复用。团队可以在 Git 中维护口径，在发布时审阅变化，让“支付收入怎么算、订单如何关联客户”成为可复用的业务定义。
+
+**[从业务需求到语义包：完整中文教程](docs/agent-semantic-package-tutorial.zh-CN.md)** 包含官方 Skill 安装、Agent 提示词、三张示例表的构建过程、完整 YAML、云端结果核对及发布回读步骤，并提供[可运行项目](examples/agent-semantic-package)。
+
+```bash
+python -m pip install 'dbt-core==1.12.6' 'dbt-maxcompute[semantic]==1.12.1b1' 'maxc-cli==0.9.5b1'
+```
+
+当前导出范围为 simple/ratio、UTC 和单跳 LEFT 关联。更多参数见[导出参考](docs/semantic-export.zh-CN.md)。
+
 ## What is dbt?
 
 **[dbt](https://www.getdbt.com/)** empowers data analysts and engineers to transform their data using software
@@ -30,19 +42,22 @@ adapter, please refer to the [official documentation](https://docs.getdbt.com/do
 
 ### Adapter Versioning
 
-This adapter follows [semantic versioning](https://semver.org/) and the dbt Core
-1.11 compatibility line. Individual capabilities can have a narrower maturity
-level than the adapter package:
+This adapter follows [semantic versioning](https://semver.org/). **dbt-maxcompute
+1.12.0 adds verified compatibility with dbt Core 1.12**, while retaining support
+for the tested dbt Core 1.11 combinations (minimum 1.11.2). The exact versions
+and feature boundaries are documented in the
+[Core compatibility guide](docs/dbt-core-compatibility.md). Individual capabilities
+can have a narrower maturity level than the adapter package:
 
 | Capability | Status | Intended use |
 |---|---|---|
 | SQL models and established materializations | Generally Available | Production |
-| MaxFrame Python models | **Production Preview** | Selected production workloads after reviewing documented limitations |
-| Python scalar and aggregate UDFs | **Beta** | Evaluation and controlled workloads; dependency conventions may change before GA |
+| MaxFrame Python models | Generally Available | Production within the documented supported scope |
+| Python scalar and aggregate UDFs | Generally Available | Production within the documented supported scope |
 
-Production Preview and Beta limitations are documented in their respective
-guides. Pre-release package versions such as `1.11.3b3` do not replace the
-latest stable release.
+MaxFrame Python models and Python scalar/aggregate UDFs are Generally Available
+starting with `1.11.3`. Their guides retain the supported scope and known
+limitations, including remote MaxFrame DAG cancellation.
 
 ## Getting Started
 
@@ -53,14 +68,24 @@ latest stable release.
 conda create --name dbt-maxcompute-example python=3.11
 conda activate dbt-maxcompute-example
 
-pip install dbt-core
-pip install dbt-maxcompute
+python -m pip install "dbt-maxcompute==1.12.0" "dbt-core==1.12.6"
 ```
 
 To run Python models on MaxFrame, install the optional MaxFrame runtime:
 
 ```bash
-pip install "dbt-maxcompute[maxframe]"
+python -m pip install "dbt-maxcompute[maxframe]==1.12.0" "dbt-core==1.12.6"
+```
+
+MaxFrame 2.x requires NumPy 1.x, so this extra selects PyArrow below 26. PyArrow 26
+requires NumPy 2 at import time; installing it alongside MaxFrame can make `dbt seed`
+report that PyArrow is missing even though it is installed.
+
+For an existing preview environment affected by this problem, upgrade to the
+release that includes the dependency guard:
+
+```bash
+python -m pip install --upgrade "dbt-maxcompute[maxframe]==1.12.0"
 ```
 
 ### Configure dbt profile:
@@ -153,6 +178,7 @@ odps.sql.decimal.odps2: "true"
 odps.sql.allow.fullscan: "true"
 odps.sql.select.output.format: "csv"
 odps.sql.submit.mode: "script"
+odps.sql.python.version: "cp311"
 odps.sql.allow.cartesian: "true"
 odps.sql.allow.schema.evolution: "true"
 odps.table.append2.enable": "true"
@@ -313,7 +339,9 @@ partition_by={
 ```
 
 Supported incremental strategies are `merge`, `append`, `delete+insert`,
-`insert_overwrite`, and `microbatch`. Incremental targets are created as
+`insert_overwrite`, `microbatch`, and the opt-in `truncate_insert` for
+[whole-table replacement on non-partitioned targets](docs/truncate-insert.md).
+Incremental targets are created as
 transactional MaxCompute tables because MaxCompute `MERGE` requires that
 property. Python microbatch models apply dbt's half-open event-time window to
 the returned DataFrame before writing each batch. For what a `microbatch` batch
@@ -425,7 +453,7 @@ Due to MaxCompute engine characteristics, the following limitations apply:
 | **No rowcount support** | MaxCompute does not return the number of affected rows after DML operations. The `rows_affected` field in adapter responses will not be available. |
 | **No transaction support** | MaxCompute does not support traditional database transactions. `BEGIN`, `COMMIT`, and `ROLLBACK` operations are no-ops. |
 | **No index DDL** | MaxCompute has no `CREATE INDEX`. dbt accepts an `indexes:` config but the adapter never applies it, so models that rely on it get no index and no warning. |
-| **Incremental full refresh is not atomic** | `dbt run --full-refresh` on an incremental SQL model drops the existing table and rebuilds it in place, instead of building a scratch relation and renaming. A build that fails midway leaves the previous version gone. |
+| **Incremental full refresh is not atomic** | `dbt run --full-refresh` on an incremental SQL model, including `truncate_insert`, drops the existing table and rebuilds it in place, instead of building a scratch relation and renaming. A build that fails midway leaves the previous version gone. Configure `full_refresh=false` to keep a `truncate_insert` target even during `--full-refresh`. |
 | **Declared-width columns are widened before an incremental write** | MaxCompute truncates an over-long value on insert without failing the job, so dbt-core's column-widening pass has to run *before* the merge, and it now does: `adapter.expand_target_column_types` submits `alter table ... change column` and the target keeps the incoming value. Two kinds of column are left alone because MaxCompute refuses to re-type them at all -- primary key and partition columns -- and a column that keeps a declared width against an unbounded `string` source; both are reported in the run log instead of losing characters quietly. Set `expand_column_types` on a model to choose: `bounded` (default) never drops a declared width, `widen` also turns such a column into unbounded `string` so no value can be lost, `off` restores the previous behaviour of never touching the target schema. Widening cannot be undone: MaxCompute rejects `string -> varchar(n)`. |
 | **Snapshots need a transactional, keyless target** | Expiring a snapshot version is a `MERGE INTO`, which MaxCompute runs only on transactional tables, and a key's expired version must coexist with its current version. A pre-existing plain table or a primary-key (PK Delta) table is rejected before the merge; see [Snapshot support](docs/snapshot-support.md). |
 
@@ -454,3 +482,13 @@ Your feedback helps improve the project:
 
 We are committed to fostering a welcoming and inclusive environment. All community members are expected to adhere to
 the [dbt Code of Conduct](https://community.getdbt.com/code-of-conduct).
+
+## Export dbt semantic definitions
+
+Use the adapter-provided macro through dbt's existing entry point: `dbt run-operation dbt_maxcompute.export_semantic_package --args '{name: sales, timezone: UTC, join_type: LEFT}'`. See the [Chinese guide](docs/semantic-export.zh-CN.md) for installation, supported semantics, and the separate maxc review/publish workflow.
+
+Install the semantic package export preview (Python 3.12 recommended):
+
+```bash
+python -m pip install 'dbt-core==1.12.6' 'dbt-maxcompute[semantic]==1.12.1b1' 'maxc-cli==0.9.5b1'
+```
