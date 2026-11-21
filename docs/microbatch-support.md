@@ -104,7 +104,8 @@ Two edges are kept visible rather than smoothed over:
 | Combination | Outcome | Enforced by |
 | --- | --- | --- |
 | no `partition_by` | rejected: "The 'microbatch' strategy requires a `partition_by` config." | this adapter |
-| `event_time` declared as `partition_by.data_type: date` | rejected: "cannot batch on a `date` event column" | this adapter |
+| `event_time` declared as `partition_by.data_type: date`, SQL model | rejected: "cannot batch on a `date` event column" | this adapter |
+| the same declaration on a MaxFrame Python model | **accepted**; the window is bound in Python instead (see below) | nobody |
 | `partition_by.granularity` != `batch_size` | rejected: "requires a `partition_by` config with the same granularity as its configured `batch_size`" | this adapter |
 | no `event_time` | rejected during parsing: "Microbatch model '<name>' must provide an 'event_time' (string) config" | dbt-core |
 | no `batch_size` | rejected during parsing | dbt-core |
@@ -120,8 +121,8 @@ corrected in the same change as this page.)
 
 ## A `date` event column cannot match a batch window
 
-`partition_by` with `data_type: date` is refused for `microbatch`, and it is worth knowing why the
-refusal is the only safe shape. dbt-core compares each batch as
+`partition_by` with `data_type: date` is refused for `microbatch` **SQL models**, and it is worth
+knowing why the refusal is the only safe shape there. dbt-core compares each batch as
 
 ```sql
 event_time >= '2025-05-01 00:00:00+00:00' and event_time < '2025-05-02 00:00:00+00:00'
@@ -189,6 +190,18 @@ The workaround is measured on the adapter's default session (`timezone` unset, s
 taken on the session clock (`2025-05-01` reads as `2025-04-30 16:00:00` UTC in an `Asia/Shanghai`
 session) and lands on the previous partition day: that is the session-timezone problem below, not a
 new one.
+
+### Why the refusal stops at SQL models
+
+The comparison above is a property of the boundary *text* submitted to SQL. A MaxFrame Python
+model does not take that path: `maxframe_write_table` binds the window in Python, converting the
+event series with `astype("datetime64[ns]")` and filtering it against `pandas.Timestamp` bounds
+(`dbt/include/maxcompute/macros/relations/table/create.sql:102-116`). A text-versus-`DATE`
+comparison never happens there, so the refusal would stop a model for a reason that does not
+describe it, and it is not applied to `language == 'python'`. Whether that path selects the right
+rows for a `DATE` event column is **not measured** here - what is measured is only that it does
+not use the comparison this error describes. Any language other than an explicit `python` keeps
+the check, so an unexpected one fails closed instead of running empty.
 
 ## The session timezone decides whether a window maps onto one partition
 

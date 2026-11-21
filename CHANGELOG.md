@@ -50,8 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against one still fails to compile instead of silently changing the window.
   See `docs/microbatch-support.md`.
 
-- Microbatch models that declare their event column as a `date` partition field are now refused
-  at compile time instead of running empty. dbt-core compares each batch against a timestamp-shaped
+- Microbatch **SQL** models that declare their event column as a `date` partition field are now
+  refused at compile time instead of running empty; MaxFrame Python models are left alone,
+  because they bind their window in Python rather than comparing a boundary text to the column. dbt-core compares each batch against a timestamp-shaped
   boundary (`event_time >= '2025-05-01 00:00:00'` since #40, with an offset before it), and
   MaxCompute evaluates a `DATE` against either text as `NULL` rather than raising: every batch
   selected zero rows, the `insert overwrite` of an empty query changed nothing, and `dbt run`

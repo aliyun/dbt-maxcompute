@@ -1,4 +1,4 @@
-{% macro mc_validate_microbatch_config(partition_by, batch_size, event_time) %}
+{% macro mc_validate_microbatch_config(partition_by, batch_size, event_time, language=None) %}
   {% if partition_by is none %}
     {% set missing_partition_msg -%}
     The 'microbatch' strategy requires a `partition_by` config.
@@ -27,7 +27,14 @@
   {#-- TIMESTAMP_NTZ column it evaluates to NULL, i.e. it silently empties the models that work    --#}
   {#-- today. Combining the two texts with OR is not a way out either: the DATETIME case stops     --#}
   {#-- compiling. See docs/microbatch-support.md for the readings.                                 --#}
-  {% if event_time is string and partition_by.auto_partition() %}
+  {#-- This refusal is a statement about the SQL boundary text, so it is not applied to      --#}
+  {#-- MaxFrame Python models: those bind the window in Python - pandas Timestamp bounds      --#}
+  {#-- against the event series after astype("datetime64[ns]") - see                          --#}
+  {#-- relations/table/create.sql:102-116. Whether that path returns the rows it should on a  --#}
+  {#-- DATE event column is not measured here; what is measured is that it never performs the  --#}
+  {#-- DATE-versus-timestamp-text comparison this message describes. Anything other than      --#}
+  {#-- an explicit 'python' keeps the check, so an unknown language fails closed.             --#}
+  {% if event_time is string and partition_by.auto_partition() and language != 'python' %}
     {% set event_field = event_time | replace("`", "") | trim | lower %}
     {% for i in range(partition_by.fields | length) %}
       {% set field = partition_by.fields[i] | replace("`", "") | trim | lower %}

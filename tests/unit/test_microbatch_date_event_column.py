@@ -13,6 +13,13 @@ runs on a machine with no MaxCompute credentials:
   compared against something else), and a non-auto partition type carries no time semantics at all;
   neither is refused here.
 
+* the refusal is scoped to SQL models. A MaxFrame Python model binds its window in Python -
+  pandas Timestamp bounds against the event series after ``astype("datetime64[ns]")``,
+  ``relations/table/create.sql:102-116`` - so it never performs the DATE-versus-timestamp-text
+  comparison this message describes; any language other than an explicit ``python`` keeps the
+  check, so an unknown one fails closed rather than silently running empty.
+  Whether the Python path returns the right rows for a DATE column is not measured here.
+
 The end-to-end shape - an empty target behind a successful run - is measured on a real project in
 `tests/functional/adapter/incremental/test_microbatch_date_partition.py`.
 """
@@ -47,11 +54,11 @@ def _load_macro():
     return source[start : following if following != -1 else len(source)]
 
 
-def _validate(fields, data_types, event_time, granularity="day", batch_size="day"):
+def _validate(fields, data_types, event_time, granularity="day", batch_size="day", language="sql"):
     env = Environment(extensions=["jinja2.ext.do"], undefined=StrictUndefined)
     template = env.from_string(
         _load_macro()
-        + "\n{{ mc_validate_microbatch_config(partition_by, batch_size, event_time) }}"
+        + "\n{{ mc_validate_microbatch_config(partition_by, batch_size, event_time, language) }}"
     )
 
     def auto_partition():
@@ -72,6 +79,7 @@ def _validate(fields, data_types, event_time, granularity="day", batch_size="day
         partition_by=partition_by,
         batch_size=batch_size,
         event_time=event_time,
+        language=language,
         exceptions=SimpleNamespace(raise_compiler_error=_raise_compiler_error),
     )
 
@@ -106,3 +114,23 @@ def test_date_partition_column_that_is_not_the_event_field_is_not_refused():
 
 def test_non_auto_partition_types_are_not_refused():
     _validate(["dt"], ["string"], "dt")
+
+
+def test_python_model_is_not_refused_by_the_sql_date_guard():
+    # The refusal's justification is a property of SQL boundary text; a MaxFrame model filters in
+    # Python, so applying it there would stop a model for a reason that does not describe it.
+    _validate(["event_date"], ["date"], "event_date", language="python")
+
+
+def test_a_python_date_model_keeps_the_other_checks():
+    # Scoping the DATE refusal to SQL must not quietly drop the checks that apply to both paths.
+    with pytest.raises(_CompilerError) as excinfo:
+        _validate(["event_date"], ["date"], "event_date", language="python", batch_size="hour")
+    assert "same granularity" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("language", ["sql", None, "python2"])
+def test_anything_that_is_not_explicitly_python_still_fails_closed(language):
+    with pytest.raises(_CompilerError) as excinfo:
+        _validate(["event_date"], ["date"], "event_date", language=language)
+    assert _REASON in str(excinfo.value)

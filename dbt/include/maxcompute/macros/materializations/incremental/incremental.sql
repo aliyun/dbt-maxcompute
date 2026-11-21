@@ -41,7 +41,7 @@
   {%- set on_schema_change = incremental_validate_on_schema_change(config.get('on_schema_change'), default='ignore') -%}
 
   {% if incremental_strategy == 'microbatch' %}
-    {% do mc_validate_microbatch_config(partition_by, config.get('batch_size'), config.get('event_time')) %}
+    {% do mc_validate_microbatch_config(partition_by, config.get('batch_size'), config.get('event_time'), language) %}
   {% endif %}
 
 
