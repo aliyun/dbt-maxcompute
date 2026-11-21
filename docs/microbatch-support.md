@@ -107,7 +107,9 @@ Two edges are kept visible rather than smoothed over:
 | Combination | Outcome | Enforced by |
 | --- | --- | --- |
 | no `partition_by` | rejected: "The 'microbatch' strategy requires a `partition_by` config." | this adapter |
-| `event_time` declared as `partition_by.data_type: date`, SQL model | rejected: "cannot batch on a `date` event column" | this adapter |
+| the column being filtered is physically `date`, SQL model | rejected before any write, on UTC and shifted sessions alike: the batch names the `date` column and states why nothing was written | this adapter |
+| `event_time` declared as `partition_by.data_type: date` while the physical type is an instant | **warned and still runs**; a declaration is an early diagnostic, never the authority | this adapter |
+| the type could not be read (`{}` from the describe) | refused when the session would move the window; left as dbt-core's rendering on a session that would not - that path is *unverified*, not DATE-safe | this adapter |
 | the same declaration on a MaxFrame Python model | **accepted**; the window is bound in Python instead (see below) | nobody |
 | `partition_by.granularity` != `batch_size` | rejected: "requires a `partition_by` config with the same granularity as its configured `batch_size`" | this adapter |
 | no `event_time` | rejected during parsing: "Microbatch model '<name>' must provide an 'event_time' (string) config" | dbt-core |

@@ -293,7 +293,12 @@ class TestWhichTypeDecidesTheClock:
             assert clock_kind_of(raw) == "instant", raw
         for raw in ("TIMESTAMP_NTZ", "timestamp-ntz", "timestamp ntz"):
             assert clock_kind_of(raw) == "naive", raw
-        for raw in ("date", "string", "bigint", "", None):
+        # `date` is kept distinct from `unknown` on purpose: it is a *verified* answer, and the only
+        # verified answer this strategy can never window - so the caller refuses it on every session,
+        # not only when a clock disagreement happens to notice.
+        for raw in ("date", "DATE", " date "):
+            assert clock_kind_of(raw) == "date", raw
+        for raw in ("string", "bigint", "", None):
             assert clock_kind_of(raw) == "unknown", raw
 
     @pytest.mark.parametrize("column_type", ["timestamp", "datetime"])
@@ -369,6 +374,49 @@ class TestWhichTypeDecidesTheClock:
             "2025-05-01 00:00:00", "2025-05-02 00:00:00"
         )
 
+    def test_a_verified_date_column_is_refused_on_a_utc_session_too(self, session_clock):
+        """The refusal cannot wait for the clock to disagree: on UTC the text still compares to NULL."""
+        options.local_timezone = False
+        with pytest.raises(DbtRuntimeError) as refused:
+            _render(column_type="date")
+        message = str(refused.value)
+        assert "cannot window a microbatch model on the `date` column" in message
+        assert "NULL" in message
+
+    def test_the_date_refusal_comes_before_the_session_clock_fallback(self, session_clock):
+        """An unresolvable zone used to hand the window back to dbt-core untouched - even for DATE.
+
+        The clock fallback is the right answer for a type this adapter cannot read; it is the wrong
+        answer for a type it *can* read and knows cannot be windowed, so the DATE check runs first.
+        """
+        options.local_timezone = "Not/AZone"
+        with pytest.raises(DbtRuntimeError) as refused:
+            _render(column_type="date")
+        assert "date" in str(refused.value)
+
+    def test_the_date_refusal_says_verified_and_names_a_declared_mismatch(self, session_clock):
+        """Distinct from the unverifiable-clock refusal: here the warehouse answered."""
+        options.local_timezone = "Asia/Shanghai"
+        with pytest.raises(DbtRuntimeError) as refused:
+            _render(column_type="date", declared_type="timestamp")
+        message = str(refused.value)
+        assert "could not be read" not in message
+        assert "declares `data_type: timestamp`" in message
+
+    def test_the_unverified_utc_path_stays_compatible_and_is_not_called_date_safe(
+        self, session_clock
+    ):
+        """No describe answer + a session that would not move: dbt-core's text is kept.
+
+        Retained for compatibility, pinned here as *unverified* - the column may still be a DATE, and
+        nothing in this branch proves otherwise. It is documented that way in
+        docs/microbatch-support.md rather than presented as safe.
+        """
+        options.local_timezone = False
+        assert _render(column_type=None, declared_type="date") == _window(
+            "2025-05-01 00:00:00", "2025-05-02 00:00:00"
+        )
+
     def test_a_date_field_is_refused_instead_of_comparing_to_null_forever(self, session_clock):
         """`date` event columns cannot answer the clock question either.
 
@@ -432,6 +480,21 @@ class TestWhichTypeDecidesTheClock:
             assert declared._render_event_time_filtered(window) == _window(
                 "2025-05-01 00:00:00", "2025-05-02 00:00:00"
             )
+
+    def test_a_utc_session_asks_the_warehouse_once_per_decision_too(self, session_clock):
+        """The cost of the DATE check: a UTC session is no longer allowed to skip the question.
+
+        One metadata call per decision, never memoed - the same rule #38 states for shifted sessions,
+        now also on a session that moves nothing, because the refusal it protects against
+        (a verified DATE compared against timestamp-shaped text) does not depend on the clock.
+        """
+        options.local_timezone = False
+        relation = MaxComputeRelation.create(identifier="microbatch_model")
+        window = EventTimeFilter(field_name="event_time", start=UTC_DAY_START, end=UTC_DAY_END)
+        with _asked_physical_answers(["timestamp", "timestamp"]) as asked:
+            assert relation._render_event_time_filtered(window)
+            assert relation._render_event_time_filtered(window)
+        assert len(asked) == 2, asked
 
     def test_every_render_asks_the_warehouse_again(self, session_clock):
         """No memo across renders: the answer that decides a clock is read when it is needed.

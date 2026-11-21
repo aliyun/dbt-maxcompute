@@ -20,13 +20,16 @@
   {#-- +08:00/-08:00 ones alike, so this is not a clock disagreement (the session-timezone defect  --#}
   {#-- is a separate one): a DATE event column can never be windowed by this strategy.             --#}
   {#--                                                                                             --#}
-  {#-- Refusing here is the only safe place. The boundary is rendered by dbt-core from a field     --#}
-  {#-- name - the column type is not available there - and the date-only form that a DATE column   --#}
-  {#-- does accept is measured to be unusable as a blanket replacement: against a DATETIME column  --#}
-  {#-- '2025-05-01' raises ODPS-0130071 (invalid operand type), and against a TIMESTAMP or          --#}
-  {#-- TIMESTAMP_NTZ column it evaluates to NULL, i.e. it silently empties the models that work    --#}
-  {#-- today. Combining the two texts with OR is not a way out either: the DATETIME case stops     --#}
-  {#-- compiling. See docs/microbatch-support.md for the readings.                                 --#}
+  {#-- This is an EARLY DIAGNOSTIC, not the authority. The authority is the physical type of the   --#}
+  {#-- column being filtered, asked once per decision in the adapter's filter path, which can       --#}
+  {#-- describe the relation (#38's renderer plus this branch): a verified DATE there is refused on --#}
+  {#-- every session, before any session-clock fallback. What is *not* done any more is letting a   --#}
+  {#-- YAML declaration stop a model: measured on the real ref() path, a column physically          --#}
+  {#-- `timestamp` was declared `timestamp_ntz`, so trusting the declaration would both over- and   --#}
+  {#-- under-refuse. No type-blind boundary text exists either: the date-only form that a DATE      --#}
+  {#-- column does accept raises ODPS-0130071 against a DATETIME column and evaluates to NULL for   --#}
+  {#-- TIMESTAMP and TIMESTAMP_NTZ, and OR-ing the two texts inherits the DATETIME failure - those  --#}
+  {#-- readings are in docs/microbatch-support.md.                                                 --#}
   {#-- This refusal is a statement about the SQL boundary text, so it is not applied to      --#}
   {#-- MaxFrame Python models: those bind the window in Python - pandas Timestamp bounds      --#}
   {#-- against the event series after astype("datetime64[ns]") - see                          --#}
@@ -41,12 +44,14 @@
       {% set data_type = partition_by.data_types[i] | trim | lower %}
       {% if field == event_field and data_type == "date" %}
         {% set date_event_time_msg -%}
-The 'microbatch' strategy cannot batch on a `date` event column.
+The 'microbatch' strategy warns: this model declares a `date` event partition column.
   `event_time`: {{ event_time }}
   `partition_by`: field {{ partition_by.fields[i] }} is declared data_type {{ partition_by.data_types[i] }}
 A batch is compared against a timestamp-shaped boundary ({{ event_time }} >= '2025-05-01
 00:00:00+00:00'), and MaxCompute evaluates a DATE against that text as NULL rather than raising:
-every batch selects zero rows, the overwrite writes nothing, and the run still reports success.
+every batch selects zero rows, the overwrite writes nothing, and the run still reports success - which
+is why the adapter refuses that case as soon as it can verify the physical type. A declaration alone is
+not enough to stop the model: the column being filtered may well be an instant.
 The window is attached to the upstream relation's `event_time` column, so that column is what has to
 become an instant: cast it where the upstream model is built and declare `event_time` on the result,
 then partition this model on it with `data_type: timestamp`. A `cast()` inside this model's own
@@ -54,7 +59,7 @@ SELECT is measured to be too late - the batch is still empty and still reported 
 DATE->DATETIME is not a way out either (this warehouse refuses that cast), and neither is making the
 DATE column itself the partition key (MaxCompute partition keys must be BIGINT or STRING).
         {%- endset %}
-        {% do exceptions.raise_compiler_error(date_event_time_msg) %}
+        {% do exceptions.warn(date_event_time_msg) %}
       {% endif %}
     {% endfor %}
   {% endif %}

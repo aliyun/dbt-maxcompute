@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, tzinfo, timezone
-from typing import Dict, FrozenSet, Optional, TypeVar
+from typing import Dict, FrozenSet, List, Optional, Tuple, TypeVar
 
 from dbt.adapters.base.relation import BaseRelation, EventTimeFilter, InformationSchema
 from dbt.adapters.contracts.relation import RelationType, Path, Policy, RelationConfig
@@ -135,6 +135,13 @@ _INSTANT_BEARING_TYPES = frozenset(
 #: window on the session clock moves every batch into its neighbour's partition (measured end to
 #: end: the next `insert overwrite` erases the rows the previous batch wrote).
 _NAIVE_TYPES = frozenset({"timestampntz"})
+#: Physical `DATE` columns. Compared against either boundary text shape the server returns `NULL`
+#: rather than raising, so every batch selects nothing, the empty `insert overwrite` changes nothing
+#: and the run reports success with the target left empty (measured end to end: four rows across two
+#: days, `PASS=2`, zero rows, on `Etc/GMT`, `Asia/Shanghai` and `Etc/GMT+8` alike). Neither text shape
+#: can be rendered instead: the date-only form empties `timestamp`/`timestamp_ntz` and stops
+#: `datetime` compiling, and OR-ing them inherits that failure.
+_DATE_TYPES = frozenset({"date"})
 
 
 def normalize_column_type(raw_type: Optional[str]) -> str:
@@ -147,17 +154,21 @@ def normalize_column_type(raw_type: Optional[str]) -> str:
 
 
 def clock_kind_of(raw_type: Optional[str]) -> str:
-    """`instant` / `naive` / `unknown` - which clock a column of this type is compared on.
+    """`instant` / `naive` / `date` / `unknown` - which clock a column of this type is compared on.
 
-    `unknown` is deliberately not folded into either branch: it covers `date`, an unparseable
-    declaration, or a type a future MaxCompute adds. On a session whose clock differs from UTC the
-    caller refuses instead of guessing, because both readings are wrong half the time.
+    `date` is kept **distinct** from `unknown`: it is a verified answer, and it is a verified answer
+    that can never be windowed by this strategy, so the caller refuses it on every session instead of
+    waiting for a clock disagreement to notice. `unknown` stays the unverifiable case - the relation
+    could not be described, or a type a future MaxCompute adds - and on a session that would move the
+    window the caller refuses instead of guessing, because both readings are wrong half the time.
     """
     name = normalize_column_type(raw_type)
     if name in _INSTANT_BEARING_TYPES:
         return "instant"
     if name in _NAIVE_TYPES:
         return "naive"
+    if name in _DATE_TYPES:
+        return "date"
     return "unknown"
 
 
@@ -322,17 +333,25 @@ class MaxComputeRelation(BaseRelation):
             return base
 
         # Decide the clock once per window, not once per boundary: both ends are the same field.
+        # The physical type is asked first, before any session-clock fallback, because a verified
+        # `DATE` column is broken on *every* session - on a UTC one too, where the text simply
+        # evaluates to NULL. Asking costs one metadata call per decision even when nothing would
+        # move; that is the price of refusing the silent empty batch instead of rendering it.
+        kind = self._event_field_clock_kind(event_time_filter.field_name)
+        if kind == "date":
+            raise self._refuse(
+                self._date_event_column_message(event_time_filter.field_name, boundaries)
+            )
         readings = []
         for boundary, _operator in boundaries:
             shifted = session_boundary_text(boundary)
             if shifted is None:
-                # A session clock this cannot state the window on: leave dbt-core's rendering alone.
+                # A session clock this cannot state the window on. On a `DATE` column this point is
+                # already unreachable (refused above); reaching here means the type could not be
+                # verified at all, so dbt-core's rendering is left alone. That compatibility path is
+                # *unverified*, not DATE-safe, and the unit cases pin it as such.
                 return base
             readings.append((shifted, session_wall_clock(_utc_moment(boundary))))
-        session_moved = any(shifted != utc_text for shifted, utc_text in readings)
-        kind = (
-            self._event_field_clock_kind(event_time_filter.field_name) if session_moved else "none"
-        )
 
         parts = []
         chosen = []
@@ -403,6 +422,45 @@ class MaxComputeRelation(BaseRelation):
                 % (field_name, self.render(), self.event_field_declared_type)
             )
         return "unknown"
+
+    def _date_event_column_message(
+        self, field_name: str, boundaries: List[Tuple[datetime, str]]
+    ) -> str:
+        """The refusal for a *verified* physical DATE column on the SQL filtering path.
+
+        Distinct from the unverifiable-clock refusal on purpose: here the warehouse answered, and the
+        answer is that no batch of this model can ever select a row. The declaration the model wrote
+        is named when it differs, so the user sees which claim was declined rather than being told
+        the type is unknown.
+        """
+        declared = self.event_field_declared_type
+        declared_note = (
+            ""
+            if not declared
+            else " The model declares `data_type: %s` for the partition field; the physical type of "
+            "the column being filtered is what the server compares, and that is DATE." % declared
+        )
+        start_text, end_text = boundaries[0][0], boundaries[-1][0]
+        return (
+            "MaxCompute cannot window a microbatch model on the `date` column %r of %s. The batch is "
+            "compared as `%s >= '%s 00:00:00'` and `%s < '%s 00:00:00'`, and a DATE against that "
+            "timestamp-shaped text evaluates to NULL rather than raising: no row satisfies the "
+            "predicate, so every batch selects nothing, the empty `insert overwrite` changes nothing, "
+            "and the run would report success with the target left exactly as it was. Nothing has "
+            "been written for this batch.%s To make it workable: expose the event column as an "
+            "instant in the relation being read (cast it in the upstream model and declare "
+            "`event_time` on that column) - a cast inside this model's own SELECT is applied after "
+            "the window and is measured to stay empty. See docs/microbatch-support.md."
+            % (
+                field_name,
+                self.render(),
+                field_name,
+                start_text.strftime("%Y-%m-%d"),
+                field_name,
+                end_text.strftime("%Y-%m-%d"),
+                declared_note,
+            )
+        )
 
     def _unverifiable_clock_message(self, field_name: str, boundary: datetime, text: str) -> str:
         # The declaration is reported, never used: a describe failure is exactly when trusting it

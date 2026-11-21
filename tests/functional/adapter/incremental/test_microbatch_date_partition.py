@@ -38,7 +38,9 @@ _staged_sql = (
     "select id, cast(event_date as timestamp) as event_time from {{ ref('input_model') }}\n"
 )
 
-_REASON = "cannot batch on a `date` event column"
+_REASON = "warns: this model declares a `date` event partition column"
+# The authority is the physical type, asked in the adapter's filter path; its refusal says so.
+_PHYSICAL_REFUSAL = "cannot window a microbatch model on the `date` column"
 
 DAY1 = ("2025-05-01", "2025-05-02")
 DAY2 = ("2025-05-02", "2025-05-03")
@@ -104,7 +106,13 @@ class _WindowedScenario:
 
 
 class TestMicrobatchDateColumnIsRefused(_WindowedScenario):
-    """The reported shape: the event column is also the partition column, declared `date`."""
+    """The reported shape: the event column is also the partition column, declared `date`.
+
+    Two things must be visible in the output. The compile-time diagnostic names the declaration, so a
+    user reading the model sees the shape being called out; the *stop* itself is the adapter refusing
+    a verified physical `DATE`, which is what guarantees the same shape is refused when the
+    declaration says something else (see the class below).
+    """
 
     model_sql = _microbatch_model("event_date", "date", "id, event_date")
 
@@ -122,18 +130,22 @@ class TestMicrobatchDateColumnIsRefused(_WindowedScenario):
             ),
             expect_pass=None,
         )
-        assert _REASON in output, f"expected the refusal in:\n{output}"
+        assert _PHYSICAL_REFUSAL in output, f"expected the physical-type refusal in:\n{output}"
+        assert _REASON in output, f"expected the early diagnostic in:\n{output}"
+        assert "NULL" in output, "the refusal has to say why nothing would be selected"
         assert not self._target_exists(
             project
         ), "a refused model must not leave an empty target behind for a downstream to read"
 
 
-class TestMicrobatchCastInsideModelIsStillEmpty(_WindowedScenario):
-    """A `cast()` in the microbatch model's own SELECT does not fix the window.
+class TestMicrobatchCastInsideModelIsRefused(_WindowedScenario):
+    """A `cast()` in the microbatch model's own SELECT does not fix the window - and now stops.
 
-    The batch predicate is attached to the upstream relation, whose `event_date` is still a DATE, so
-    it is still `NULL` and the batch is still empty - and the run still succeeds. Nothing in this
-    adapter can see the upstream column's type, so this residual is documented, not refused.
+    Measured shape: the batch predicate is attached to the *upstream* relation, whose `event_date`
+    is still a physical DATE, while this model declares its own partition field as `timestamp`. The
+    declaration-level check therefore says nothing here (and must not refuse: a declaration is not
+    the authority), while the physical type read in the filter path does. Characterisation flipped on
+    review: this used to assert an empty target behind a successful run, which was the defect.
     """
 
     model_sql = _microbatch_model(
@@ -144,12 +156,19 @@ class TestMicrobatchCastInsideModelIsStillEmpty(_WindowedScenario):
     def models(self):
         return {"input_model.sql": _input_sql, "microbatch_model.sql": self.model_sql}
 
-    def test_upstream_date_column_still_empties_the_batch(self, project):
-        self._window(project, *DAY1)
-        assert self._ids(project) == [], (
-            "measured: the window is compared against the *upstream* DATE column, so the target "
-            "stays empty even though this model's own column is a timestamp"
+    def test_the_upstream_physical_date_is_refused_not_rendered_empty(self, project):
+        _, output = run_dbt_and_capture(
+            self._args("--event-time-start", DAY1[0], "--event-time-end", DAY1[1]),
+            expect_pass=None,
         )
+        assert _PHYSICAL_REFUSAL in output, f"expected the physical-type refusal in:\n{output}"
+        assert not self._target_exists(project), (
+            "the batch was refused before anything was written, so no empty target is left behind "
+            "for a downstream to read"
+        )
+        # Not asserted here, and deliberately so: a *pre-populated* target staying byte-for-byte
+        # unchanged across a refused batch needs a seeding path this suite does not have yet, and a
+        # cell that cannot run is not evidence. Follows in the same revision once the seed exists.
 
 
 class TestMicrobatchDateColumnWorkaround(_WindowedScenario):

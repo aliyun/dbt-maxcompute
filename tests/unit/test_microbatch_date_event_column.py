@@ -24,7 +24,6 @@ The end-to-end shape - an empty target behind a successful run - is measured on 
 `tests/functional/adapter/incremental/test_microbatch_date_partition.py`.
 """
 
-import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -35,7 +34,7 @@ _MACRO_PATH = (
     Path(__file__).resolve().parents[2]
     / "dbt/include/maxcompute/macros/materializations/incremental/incremental_strategy/microbatch.sql"
 )
-_REASON = "cannot batch on a `date` event column"
+_REASON = "warns: this model declares a `date` event partition column"
 
 
 class _CompilerError(Exception):
@@ -75,13 +74,15 @@ def _validate(fields, data_types, event_time, granularity="day", batch_size="day
         granularity=granularity,
         auto_partition=auto_partition,
     )
+    warned: list = []
     template.render(
         partition_by=partition_by,
         batch_size=batch_size,
         event_time=event_time,
         language=language,
-        exceptions=SimpleNamespace(raise_compiler_error=_raise_compiler_error),
+        exceptions=SimpleNamespace(raise_compiler_error=_raise_compiler_error, warn=warned.append),
     )
+    return warned
 
 
 def test_macro_source_is_found():
@@ -89,10 +90,18 @@ def test_macro_source_is_found():
 
 
 @pytest.mark.parametrize("event_field", ["event_date", "`event_date`", "EVENT_DATE"])
-def test_date_event_column_is_refused(event_field):
-    with pytest.raises(_CompilerError) as excinfo:
-        _validate(["event_date"], ["date"], event_field)
-    message = str(excinfo.value)
+def test_a_declared_date_event_column_warns_and_does_not_stop_the_model(event_field):
+    """A declaration is not the authority any more, so it cannot stop a model on its own.
+
+    The refusal for a real `DATE` column lives in the adapter's filter path, where the warehouse can
+    be asked; this check only says early, in the model's own terms, that the shape is known-broken.
+    Asserting the *absence* of an error here is the point: the case this guard used to refuse -
+    a physically instant column declared `date`, which is what the real `ref()` path produces when
+    YAML and the table disagree - has to compile.
+    """
+    warned = _validate(["event_date"], ["date"], event_field)
+    assert len(warned) == 1, warned
+    message = str(warned[0])
     assert _REASON in message
     # The message has to carry the way out, not only the veto - including where the cast belongs,
     # which is measured (a cast inside this model's own SELECT leaves the batch empty).
@@ -103,34 +112,35 @@ def test_date_event_column_is_refused(event_field):
 
 @pytest.mark.parametrize("data_type", ["timestamp", "datetime", "timestamp_ntz"])
 def test_types_that_work_today_keep_compiling(data_type):
-    _validate(["event_date"], [data_type], "event_date")
+    assert _validate(["event_date"], [data_type], "event_date") == []
 
 
-def test_date_partition_column_that_is_not_the_event_field_is_not_refused():
+def test_date_partition_column_that_is_not_the_event_field_is_not_diagnosed():
     # The window is compared against `created_at`; the DATE column only names partitions. Refusing
     # this would stop a model whose batches do select rows.
     _validate(["event_date"], ["date"], "created_at")
 
 
-def test_non_auto_partition_types_are_not_refused():
-    _validate(["dt"], ["string"], "dt")
+def test_non_auto_partition_types_are_not_diagnosed():
+    assert _validate(["dt"], ["string"], "dt") == []
 
 
-def test_python_model_is_not_refused_by_the_sql_date_guard():
-    # The refusal's justification is a property of SQL boundary text; a MaxFrame model filters in
-    # Python, so applying it there would stop a model for a reason that does not describe it.
-    _validate(["event_date"], ["date"], "event_date", language="python")
+def test_python_model_hears_no_sql_diagnostic_at_all():
+    # The message's justification is a property of SQL boundary text; a MaxFrame model filters in
+    # Python, so even the warning would describe a comparison it never performs.
+    assert _validate(["event_date"], ["date"], "event_date", language="python") == []
 
 
 def test_a_python_date_model_keeps_the_other_checks():
-    # Scoping the DATE refusal to SQL must not quietly drop the checks that apply to both paths.
+    # Narrowing the DATE case must not quietly drop the checks that apply to both paths.
     with pytest.raises(_CompilerError) as excinfo:
         _validate(["event_date"], ["date"], "event_date", language="python", batch_size="hour")
     assert "same granularity" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("language", ["sql", None, "python2"])
-def test_anything_that_is_not_explicitly_python_still_fails_closed(language):
-    with pytest.raises(_CompilerError) as excinfo:
-        _validate(["event_date"], ["date"], "event_date", language=language)
-    assert _REASON in str(excinfo.value)
+def test_anything_that_is_not_explicitly_python_still_hears_the_diagnostic(language):
+    """The diagnostic itself is not silently skipped for a language this repo does not know."""
+    warned = _validate(["event_date"], ["date"], "event_date", language=language)
+    assert len(warned) == 1, (language, warned)
+    assert _REASON in str(warned[0])
