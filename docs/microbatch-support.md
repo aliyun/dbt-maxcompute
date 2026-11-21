@@ -203,6 +203,19 @@ taken on the session clock (`2025-05-01` reads as `2025-04-30 16:00:00` UTC in a
 session) and lands on the previous partition day: that is the session-timezone problem below, not a
 new one.
 
+### Measured ordering: which refusal the console actually shows
+
+Both checks exist, so it is worth stating which one fires first, measured on a real project:
+
+* declaration **and** physical type both `date` - the adapter asks while it builds the batch
+  predicate, before the materialization macro reaches `mc_validate_microbatch_config`, so the run
+  shows the refusal line and an error, and no warning line at all (`PASS=1 WARN=0 ERROR=1`);
+* declaration `date` over an upstream that is physically an instant - nothing is refused: the model
+  compiles, the diagnostic is printed, and both day windows write their rows (`PASS=3 ERROR=0`);
+* a target that already holds rows, then the same model recompiled over the DATE upstream - the
+  refused batch leaves the rows and the partition set exactly as they were, which is asserted with a
+  `--vars` switch in `test_microbatch_date_partition.py` rather than a second fixture.
+
 ### Why the refusal stops at SQL models
 
 The comparison above is a property of the boundary *text* submitted to SQL. A MaxFrame Python
