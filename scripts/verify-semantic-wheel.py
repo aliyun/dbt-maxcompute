@@ -41,8 +41,13 @@ def main():
             + sys.executable
             + "\n"
             + """import json,sys
+from pathlib import Path
 args=sys.argv[1:]
-if args[:3] == ['semantic','get','sales']:
+if args[:3] == ['semantic','get','sales'] and '--source' in args:
+    assert args[args.index('--source')+1]=='PUBLISHED'
+    assert args[args.index('--revision')+1]=='published_1'
+    data=json.loads(Path(__file__).with_name('published.json').read_text())
+elif args[:3] == ['semantic','get','sales']:
     data={'format':'maxc.semantic/v1','source':'USER_DRAFT','revisionId':'draft_1',
           'identity':{'endpoint':'https://example.invalid','namespace':'123','specName':'sales','specId':'spec_1'},
           'object':{'dataScope':{'dataReferences':[]}},'content':{'glossary':[{'term':'keep'}]}}
@@ -55,7 +60,7 @@ elif args[:2] == ['meta','describe'] and '--metadata-only' in args:
                   'columns':[{'name':n,'type':t} for n,t in columns[args[2]]],
                   'partition_columns':[],'has_more_columns':False}}
 else:
-    raise AssertionError('Unexpected operation; the exporter must only read snapshot/schema')
+    raise AssertionError('Unexpected operation; conversion must only read snapshot/schema')
 print(json.dumps({'status':'success','data':data}))
 """
         )
@@ -94,8 +99,60 @@ print(json.dumps({'status':'success','data':data}))
             proposal["content"]["semanticModel"]["approvedRelationships"][0]["joinType"] == "LEFT"
         )
         assert "timeConventions" in proposal["content"]["instructions"]
+        proposal.update(source="PUBLISHED", revisionId="published_1", object={})
+        (root / "published.json").write_text(json.dumps(proposal))
+        imported = root / "imported"
+        args = {
+            "name": "sales",
+            "revision": "published_1",
+            "output": str(imported),
+            "table_prefix": "dev_sales",
+            "time_spine_start": "2026-01-31",
+            "time_spine_end": "2026-02-04",
+            "maxc": str(fake_maxc),
+        }
+        subprocess.run(
+            [
+                dbt,
+                "run-operation",
+                "dbt_maxcompute.import_semantic_package",
+                "--project-dir",
+                str(root),
+                "--profiles-dir",
+                str(root),
+                "--args",
+                json.dumps(args),
+            ],
+            cwd=root,
+            env=env,
+            check=True,
+            timeout=120,
+        )
+        assert json.loads((imported / "published-package.json").read_text()) == proposal
+        shutil.copyfile(imported / "profiles.yml.example", imported / "profiles.yml")
+        env.update(
+            MAXCOMPUTE_PROJECT="p",
+            MAXCOMPUTE_SCHEMA="default",
+            MAXCOMPUTE_ENDPOINT="https://example.invalid/api",
+            ALIBABA_CLOUD_ACCESS_KEY_ID="fixture",
+            ALIBABA_CLOUD_ACCESS_KEY_SECRET="fixture",
+        )
+        subprocess.run(
+            [dbt, "parse", "--profiles-dir", str(imported)],
+            cwd=imported,
+            env=env,
+            check=True,
+            timeout=120,
+        )
+        manifest = json.loads((imported / "target/semantic_manifest.json").read_text())
+        assert {metric["name"]: metric["type"] for metric in manifest["metrics"]} == {
+            "paid_revenue": "simple",
+            "paid_orders": "simple",
+            "paid_aov": "ratio",
+        }
+        assert len(manifest["semantic_models"]) == 2
         print(
-            "PASS installed wheel: dbt CLI, bundled macro, metrics, time, join; fixture transport only"
+            "PASS installed wheel: export, Published import and generated project parse; fixture transport"
         )
 
 

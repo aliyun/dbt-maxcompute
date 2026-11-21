@@ -56,3 +56,4 @@ repos:
         -   types-protobuf
         -   types-pytz
         -   types-requests
+        -   types-PyYAML

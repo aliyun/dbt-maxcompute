@@ -1,1 +1,1 @@
-"""dbt-owned SemanticSpec conversion and export tooling."""
+"""dbt-owned SemanticSpec conversion tooling."""

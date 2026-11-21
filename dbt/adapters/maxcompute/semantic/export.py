@@ -50,10 +50,12 @@ class MaxcClient:
                 "maxc did not return successful JSON; check CLI version, authentication and target access."
             ) from exc
 
-    def read(self, name):
+    def read(self, name, *, revision=None):
         args = ["semantic", "get", name]
         if self.namespace:
             args += ["--namespace", self.namespace]
+        if revision is not None:
+            args += ["--source", "PUBLISHED", "--revision", revision]
         return self.call(args)
 
     def describe(self, relation):

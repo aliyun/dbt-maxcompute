@@ -13,18 +13,6 @@
 Welcome to the **dbt-maxCompute** repository! This project aims to extend the capabilities of **dbt** (data build tool)
 for users of Alibaba MaxCompute, a cutting-edge data processing platform.
 
-## 用 Agent 把业务口径发布为 MaxCompute 语义包（试用）
-
-让 Agent 根据业务需求编写 dbt 指标、时间维度和关联配置，经过数据验证与差异审阅后，保存为 MaxCompute 中的 Published 语义包，供具备读取能力的 MaxAgent 分析会话复用。团队可以在 Git 中维护口径，在发布时审阅变化，让“支付收入怎么算、订单如何关联客户”成为可复用的业务定义。
-
-**[从业务需求到语义包：完整中文教程](docs/agent-semantic-package-tutorial.zh-CN.md)** 包含官方 Skill 安装、Agent 提示词、三张示例表的构建过程、完整 YAML、云端结果核对及发布回读步骤，并提供[可运行项目](examples/agent-semantic-package)。
-
-```bash
-python -m pip install 'dbt-core==1.12.6' 'dbt-maxcompute[semantic]==1.12.1b1' 'maxc-cli==0.9.5b1'
-```
-
-当前导出范围为 simple/ratio、UTC 和单跳 LEFT 关联。更多参数见[导出参考](docs/semantic-export.zh-CN.md)。
-
 ## What is dbt?
 
 **[dbt](https://www.getdbt.com/)** empowers data analysts and engineers to transform their data using software
@@ -63,15 +51,18 @@ limitations, including remote MaxFrame DAG cancellation.
 
 ### Install the plugin
 
+Use the standard adapter installation for SQL models and commands such as `dbt run`,
+`dbt test`, and `dbt build`.
+
 ```bash
-# Python 3.11 is a reproducible baseline for MaxFrame custom-UDF workloads.
 conda create --name dbt-maxcompute-example python=3.11
 conda activate dbt-maxcompute-example
 
 python -m pip install "dbt-maxcompute==1.12.0" "dbt-core==1.12.6"
 ```
 
-To run Python models on MaxFrame, install the optional MaxFrame runtime:
+To run Python models on MaxFrame, install the optional MaxFrame runtime. Python
+3.11 is the baseline for MaxFrame custom UDF workloads.
 
 ```bash
 python -m pip install "dbt-maxcompute[maxframe]==1.12.0" "dbt-core==1.12.6"
@@ -88,7 +79,7 @@ release that includes the dependency guard:
 python -m pip install --upgrade "dbt-maxcompute[maxframe]==1.12.0"
 ```
 
-### Configure dbt profile:
+### Configure the dbt profile
 
 1. Create a file in the ~/.dbt/ directory named profiles.yml.
 2. Copy the following and paste into the new profiles.yml file. Make sure you update the values where noted.
@@ -107,7 +98,7 @@ jaffle_shop: # this needs to match the profile in your dbt_project.yml file
       access_key_secret: XXX # Replace this with your accessKey(sk)
 ```
 
-Currently we support the following parameters：
+MaxCompute profiles accept the following fields.
 
 | **Field**           | **Description**                                                                                             | **Default Value**                     |
 |---------------------|-------------------------------------------------------------------------------------------------------------|---------------------------------------|
@@ -148,7 +139,7 @@ While dbt core provides native configurations like `materialized` and `sql_heade
 **dbt-maxcompute specific configurations** that control table creation behavior during materialization.
 
 For Append and PK Delta Table creation with SQL `table` and `incremental` models, see
-[Delta Table support and configuration (中文)](docs/delta-tables.md).
+[Delta Table support and configuration (Chinese)](docs/delta-tables.md).
 
 For `materialized='snapshot'`, see [Snapshot support on MaxCompute](docs/snapshot-support.md):
 which strategies and target tables hold history, how hard deletes are opted into, and
@@ -434,15 +425,72 @@ dbt-core 1.11.2 + dbt-maxcompute 1.11.3b3 run on 2026-09-25 against a three-tier
 | [dbt-date](https://github.com/dingxin-tech/dbt-date) | partial | Calendar macros (`day_of_week`, `week_start`, `iso_week_of_year`, `date_part`, `convert_timezone`) executed. The date-spine family (`get_base_dates`, `get_date_dimension`, fiscal macros) fails with `ODPS-0130161 invalid TIMESTAMP format` when a plain `YYYY-MM-DD` date is passed, because `maxcompute__get_base_dates` emits a `timestamp'YYYY-MM-DD'` literal without a time part. |
 | [elementary](https://github.com/dingxin-tech/elementary) | partial | Its own models and tests build; the `monitors_runs` view fails with `ODPS-0130071` because a DOUBLE value is written into the FLOAT-typed `execution_time` column. |
 | [dbt-project-evaluator](https://github.com/dingxin-tech/dbt-project-evaluator) | blocked | `stg_nodes` fails on the same DOUBLE/FLOAT conflict, which cascades to skip most of the package's models and tests. |
-| [dbt-data-reliability](https://github.com/dingxin-tech/dbt-data-reliability) | partial | Same `monitors_runs` failure as elementary. It also still depends on the upstream `dbt-labs/dbt_utils`, which has no MaxCompute dispatch and does not build here, so that dependency has to be repointed to the MaxCompute edition. |
+| [dbt-data-reliability](https://github.com/dingxin-tech/dbt-data-reliability) | partial | Same `monitors_runs` failure as elementary; that run installed hub `dbt-labs/dbt_utils` 1.4.1 and 32 of 33 nodes still built, so the hub dependency was not what stopped this build. It is still the wrong dependency for macros that need MaxCompute dispatch (`width_bucket`, `deduplicate`), which the hub edition does not provide. |
 
 Two things to watch when installing these packages:
 
 * Several `packages.yml` files reference a branch (`revision: main`) instead of a tag, so a build is
   only reproducible if you commit `package-lock.yml`; `dbt-data-reliability` has no release tag yet.
+  Pinned refs and the lock-file workflow are spelled out below (checked against the live remotes on 2026-10-29).
 * dbt needs a three-tier MaxCompute project (`project.schema.table`). On a two-tier project, `dbt build`
   fails up front with `ODPS-0110061 Invalid database operations on two-tier model`.
 
+
+### Reproducing an install
+
+Pin the ref, then let dbt record what it resolved to. `package-lock.yml` holds full commit shas,
+so a rebuild months later installs the same code even if a branch moved or a tag was retargeted:
+
+```yaml
+# your_project/packages.yml
+packages:
+  - git: "https://github.com/dingxin-tech/dbt-expectations.git"
+    revision: 0.10.4-mc.1
+```
+
+```bash
+rm -rf dbt_packages package-lock.yml && dbt deps   # first install: resolves, installs, writes the lock
+dbt deps                                           # later runs: install exactly what the committed lock records
+dbt deps --lock                                    # regenerate the lock file only - it installs nothing
+```
+
+`--lock` is not an install command. On dbt-core 1.11 `dbt deps --help` describes it as
+"Generate the package-lock.yml file without install the packages." - it writes
+`package-lock.yml` and stops there. Reproducing an install is plain `dbt deps`: with a
+committed lock and an unchanged `packages.yml`, that is what reads the lock as its source
+of truth, and it is what a rebuild months later runs.
+
+
+| Package | `revision:` | why |
+|---|---|---|
+| [dbt-utils](https://github.com/dingxin-tech/dbt-utils) | `a8f1c6f612da282aa05655d6d3a70beccf516700` | the `1.3.0-mc.1` tag is `3463ce1e4…` while `main` is `a8f1c6f61…`; pin the sha you actually tested |
+| [dbt-date](https://github.com/dingxin-tech/dbt-date) | `0.10.1-mc.1` | tag, and it equals `main` (`80b5dca27…`) |
+| [dbt-expectations](https://github.com/dingxin-tech/dbt-expectations) | `5882c035c43d4487ca99732a40fcf31b9605cd7b` | the `0.10.4-mc.1` tag is `2c896488f…` while `main` is `5882c035c…`; pin the sha you actually tested |
+| [dbt-project-evaluator](https://github.com/dingxin-tech/dbt-project-evaluator) | `d603d32b2c25e02fc965cd31ba1f8cf7c8c81103` | the `1.0.0-mc.1` tag is `d0a400e7a…` while `main` is `d603d32b2…`; pin the sha you actually tested |
+| [elementary](https://github.com/dingxin-tech/elementary) | `0.16.4-mc.1` | tag, and it equals `main` (`684a0d21b…`) |
+| [dbt-data-reliability](https://github.com/dingxin-tech/dbt-data-reliability) | `9ec0685e6f47ba78b3c1aa574f6ab34c657a904f` | no release tag exists in this repository, so a sha is the only immutable ref |
+
+If you need code that is newer than a package's tag, pin the full commit sha of the branch you
+tested rather than the branch name, and say so in your project's `packages.yml` comment: a named
+branch silently changes underneath every install.
+
+To upgrade a dependency: change the ref, `rm -rf dbt_packages package-lock.yml && dbt deps`,
+re-run `dbt build` against a three-tier project, and commit `packages.yml` together with the new
+`package-lock.yml` so the pair can be reverted as one unit.
+
+## Optional semantic package export
+
+Publish dbt metric definitions, time dimensions, and entity relationships as a
+MaxCompute semantic package. MaxAgent analysis sessions with read access can
+reuse the published definitions.
+
+The preview uses dbt Core 1.12, `dbt-maxcompute[semantic]`, and `maxc-cli`.
+Run `dbt run-operation dbt_maxcompute.export_semantic_package` with the export
+settings to generate a local proposal. Use `maxc` to review the proposal, apply it
+to a draft, and publish the package.
+
+- [Agent tutorial with a runnable example (Chinese)](docs/agent-semantic-package-tutorial.zh-CN.md)
+- [Installation and export reference (Chinese)](docs/semantic-export.zh-CN.md)
 
 ## Known Limitations
 
@@ -482,13 +530,3 @@ Your feedback helps improve the project:
 
 We are committed to fostering a welcoming and inclusive environment. All community members are expected to adhere to
 the [dbt Code of Conduct](https://community.getdbt.com/code-of-conduct).
-
-## Export dbt semantic definitions
-
-Use the adapter-provided macro through dbt's existing entry point: `dbt run-operation dbt_maxcompute.export_semantic_package --args '{name: sales, timezone: UTC, join_type: LEFT}'`. See the [Chinese guide](docs/semantic-export.zh-CN.md) for installation, supported semantics, and the separate maxc review/publish workflow.
-
-Install the semantic package export preview (Python 3.12 recommended):
-
-```bash
-python -m pip install 'dbt-core==1.12.6' 'dbt-maxcompute[semantic]==1.12.1b1' 'maxc-cli==0.9.5b1'
-```

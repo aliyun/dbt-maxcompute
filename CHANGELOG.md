@@ -12,6 +12,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.1] — 2026-11-05
+
+### Fixed
+
+- Apply jittered backoff to confirmed aborted offline MERGE INTO commit conflicts,
+  including nested ODPS-0110061 errors, within the existing ten-submission limit.
+- Preserve credential-provider initialization failures and safe error details.
+
+### Added
+
+- Include opt-in semantic package export through dbt run-operation and the
+  semantic extra, with local proposal generation and documented validation.
+
+
 ## [1.12.0] — 2026-10-22
 
 ### Fixed

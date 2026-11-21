@@ -2,6 +2,8 @@
 
 首次使用建议先阅读[从业务需求到语义包的完整教程](agent-semantic-package-tutorial.zh-CN.md)，其中包含 Agent 提示词、可运行项目、数据口径和发布步骤。本文作为命令与转换边界参考。
 
+需要把 Published 定义带回 dbt 项目时，参见[反向导入原型](semantic-import.zh-CN.md)。
+
 本功能复用 dbt 官方的 `run-operation` 入口。适配器自带 `dbt_maxcompute.export_semantic_package` 宏，由宏调用适配器 Python 转换方法，不增加独立 CLI，也不修改 dbt Core。
 
 ```text

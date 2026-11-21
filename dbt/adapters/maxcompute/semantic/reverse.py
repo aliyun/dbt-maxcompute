@@ -1,0 +1,836 @@
+"""Map the supported semantic package contract to dbt Core 1.12 model properties."""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+import sqlglot
+from sqlglot import exp
+from sqlglot.tokens import TokenType
+
+from .conversion import AGG_MAP, physical_type
+from .files import ValidationError, digest
+
+LOGICAL_NAME = re.compile(r"(?!.*__)[a-z][a-z0-9_]{0,62}")
+PACKAGE_ELEMENT_NAME = re.compile(r"[a-z][a-z0-9_]{0,127}")
+RELATIONSHIP_NAME = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,1023}")
+MAX_JOIN_HOPS = 2
+# Reserved names in the dbt Core 1.12 semantic manifest validator.
+RESERVED_DIMENSION_NAMES = frozenset(
+    "nanosecond microsecond millisecond second minute hour day week month quarter year "
+    "metric_time mf_internal_uuid".split()
+)
+PHYSICAL_NAME = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]{0,127}")
+TOKEN = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,254}")
+CONVENTION = re.compile(
+    r"([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*): source_timezone=([^;]+); "
+    r"session_timezone=([^;]+); minimum_granularity=([A-Z]+); default_agg_time=(True|False)\."
+)
+AGGREGATIONS = {value: key for key, value in AGG_MAP.items()}
+TEXT_SECTIONS = {"instructions", "glossary", "verifiedQueries"}
+JINJA_STARTS = ("{{", "{%", "{#")
+UNRESOLVED_TIME = "unresolved_import_time"
+
+Binding = tuple[str, str, str]
+
+
+def token(value: Any, path: str, pattern: re.Pattern = TOKEN) -> str:
+    if not isinstance(value, str) or not pattern.fullmatch(value):
+        raise ValidationError(f"{path}: expected a supported identifier")
+    return value
+
+
+def record(value: Any, path: str, fields: str | None = None) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValidationError(f"{path}: expected an object")
+    if fields is not None:
+        extra = value.keys() - set(fields.split())
+        if extra:
+            raise ValidationError(f"{path}.{sorted(extra)[0]}: unsupported field")
+    return value
+
+
+def items(value: Any, path: str) -> list:
+    if not isinstance(value, list):
+        raise ValidationError(f"{path}: expected a list")
+    return value
+
+
+def named(value: Any, path: str, pattern: re.Pattern = LOGICAL_NAME) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for item in items(value, path):
+        obj = record(item, path)
+        name = token(obj.get("name"), f"{path}.name", pattern)
+        if name in result:
+            raise ValidationError(f"{path}.{name}: duplicate name")
+        result[name] = obj
+    return result
+
+
+def relation(value: Any, path: str) -> Binding:
+    ref = record(value, path, "project schema table")
+    return (
+        token(ref.get("project"), f"{path}.project", PHYSICAL_NAME),
+        token(ref.get("schema"), f"{path}.schema", PHYSICAL_NAME),
+        token(ref.get("table"), f"{path}.table", PHYSICAL_NAME),
+    )
+
+
+def table_bindings(document: dict) -> dict[str, Binding]:
+    content = record(document.get("content"), "content")
+    extra = content.keys() - (
+        {"dataReferences", "semanticModel", "metricDefinitions"} | TEXT_SECTIONS
+    )
+    if extra:
+        raise ValidationError(f"content.{sorted(extra)[0]}: unsupported section")
+    semantic = record(
+        content.get("semanticModel"),
+        "semanticModel",
+        "logicalTables namedFilters approvedRelationships",
+    )
+    refs = [
+        relation(ref, "dataReferences")
+        for ref in items(content.get("dataReferences"), "dataReferences")
+    ]
+    if len({tuple(part.lower() for part in ref) for ref in refs}) != len(refs):
+        raise ValidationError("dataReferences: duplicate physical references")
+    obj = record(document.get("object", {}), "object")
+    if "dataScope" in obj:
+        scope = record(obj["dataScope"], "object.dataScope", "dataReferences")
+        scoped = {
+            relation(ref, "object.dataScope.dataReferences")
+            for ref in items(scope.get("dataReferences"), "object.dataScope.dataReferences")
+        }
+        if scoped != set(refs):
+            raise ValidationError(
+                "object.dataScope: references do not match content.dataReferences"
+            )
+    tables = named(semantic.get("logicalTables"), "logicalTables")
+    if not 1 <= len(tables) <= 20:
+        raise ValidationError("logicalTables: expected 1 to 20 logical tables")
+    qualified = {".".join(ref): ref for ref in refs}
+    bindings = {}
+    for name, table in tables.items():
+        base = table.get("baseTable")
+        if not isinstance(base, str) or base not in qualified:
+            raise ValidationError(
+                f"logicalTables.{name}.baseTable: expected a declared project.schema.table"
+            )
+        bindings[name] = qualified[base]
+    if set(bindings.values()) != set(refs) or len(bindings) != len(refs):
+        raise ValidationError(
+            "dataReferences: each referenced relation must have one logical table"
+        )
+    return bindings
+
+
+def catalog_columns(actual: dict, binding: Binding, path: str) -> dict[str, str]:
+    if (
+        (actual.get("project"), actual.get("schema_name"), actual.get("table_name")) != binding
+        or actual.get("has_more_columns") is not False
+        or not isinstance(actual.get("partition_columns"), list)
+    ):
+        raise ValidationError(f"{path}: incomplete or mismatched live table metadata")
+    if actual["partition_columns"]:
+        raise ValidationError(f"{path}: partitioned sources require a partition-policy mapping")
+    columns = {}
+    seen = set()
+    for entry in items(actual.get("columns"), f"{path}.columns"):
+        column = record(entry, f"{path}.columns")
+        name, kind = column.get("name"), column.get("type")
+        if not isinstance(name, str) or name.lower() in seen or not isinstance(kind, str):
+            raise ValidationError(f"{path}.columns: incomplete or ambiguous column metadata")
+        seen.add(name.lower())
+        columns[name] = kind
+    return columns
+
+
+def scalar(value: Any, path: str) -> exp.Expression:
+    if not isinstance(value, str) or not value.strip() or any(s in value for s in JINJA_STARTS):
+        raise ValidationError(f"{path}: expected SQL without Jinja")
+    try:
+        parsed = sqlglot.parse(value, read="hive")
+    except (sqlglot.errors.SqlglotError, RecursionError) as exc:
+        raise ValidationError(f"{path}: cannot parse SQL") from exc
+    if len(parsed) != 1 or parsed[0] is None or any(node.comments for node in parsed[0].walk()):
+        raise ValidationError(f"{path}: expected one expression without SQL comments")
+    if any(marker in parsed[0].sql(dialect="hive") for marker in JINJA_STARTS):
+        raise ValidationError(f"{path}: expected SQL without Jinja")
+    return parsed[0]
+
+
+def description(value: Any, fallback: str) -> str:
+    # Keep template-shaped text in the source snapshot instead of rendering it through dbt.
+    if isinstance(value, str) and value.strip() and not any(s in value for s in JINJA_STARTS):
+        return value
+    return fallback
+
+
+def annotation_config(obj: dict, path: str, **lineage: Any) -> dict:
+    meta = {
+        **{
+            key: obj[key]
+            for key in ("synonyms", "isEnum", "enumValues", "usageGuidance", "tags")
+            if key in obj
+        },
+        **lineage,
+    }
+    if not meta:
+        return {}
+    if any(marker in json.dumps(meta, ensure_ascii=False) for marker in JINJA_STARTS):
+        raise ValidationError(f"{path}: metadata must not contain executable template delimiters")
+    return {"meta": {"semantic_package": meta}}
+
+
+@dataclass
+class Table:
+    name: str
+    entity: str
+    key: str | None
+    physical: dict[str, str]
+    model: dict[str, Any]
+    columns: dict[str, dict[str, Any]] = field(default_factory=dict)
+    projection: dict[str, str] = field(default_factory=dict)
+    categorical: dict[str, str] = field(default_factory=dict)
+    times: dict[str, str] = field(default_factory=dict)
+    totals_only: bool = False
+
+    def column(self, value: Any, path: str) -> str:
+        if not isinstance(value, str) or value not in self.physical:
+            raise ValidationError(f"{path}: column is missing from live metadata")
+        if any(marker in value for marker in JINJA_STARTS) or any(ord(ch) < 32 for ch in value):
+            raise ValidationError(f"{path}: unsafe physical column name")
+        return value
+
+    def column_expression(self, value: Any, path: str) -> str:
+        tree = scalar(value, path)
+        if (
+            not isinstance(tree, exp.Column)
+            or tree.table not in ("", self.name)
+            or tree.db
+            or tree.catalog
+        ):
+            raise ValidationError(f"{path}: expected a direct column on the logical table")
+        return self.column(tree.name, path)
+
+    def view_column(self, column: str, path: str) -> str:
+        if column in self.projection:
+            return self.projection[column]
+        if (
+            LOGICAL_NAME.fullmatch(column)
+            and sqlglot.tokenize(column, read="hive")[0].token_type == TokenType.VAR
+        ):
+            alias = column
+        else:
+            stem = re.sub(r"[^a-z0-9]+", "_", column.lower()).strip("_")[:40].rstrip("_")
+            alias = f"sp_{stem or 'column'}_{digest(column)[:10]}"
+            if alias in self.physical or alias in self.projection.values():
+                raise ValidationError(
+                    f"{path}: generated column alias collides with another column"
+                )
+        self.projection[column] = alias
+        return alias
+
+    def annotate(self, column: str, path: str, **properties: Any) -> None:
+        alias = self.view_column(column, path)
+        existing = self.columns.get(alias)
+        if existing is None:
+            self.columns[alias] = {"name": alias, **properties}
+        elif "entity" in existing and "dimension" in properties:
+            dimension = properties.pop("dimension")
+            derived = self.model.setdefault("derived_semantics", {}).setdefault("dimensions", [])
+            derived.append({**dimension, **properties, "expr": alias})
+        elif "dimension" in existing and set(properties) == {"entity"}:
+            derived = self.model.setdefault("derived_semantics", {}).setdefault("entities", [])
+            derived.append({**properties["entity"], "expr": alias})
+        else:
+            raise ValidationError(
+                f"{path}: ambiguous repeated semantic annotation for a physical column"
+            )
+
+    def add_totals_only_time(self) -> None:
+        if (
+            UNRESOLVED_TIME in self.physical
+            or UNRESOLVED_TIME in self.times.values()
+            or UNRESOLVED_TIME in self.categorical.values()
+        ):
+            raise ValidationError(
+                f"logicalTables.{self.name}: reserved totals-only time column conflicts with an existing field"
+            )
+        self.totals_only = True
+        self.model["agg_time_dimension"] = UNRESOLVED_TIME
+        self.columns[UNRESOLVED_TIME] = {
+            "name": UNRESOLVED_TIME,
+            "description": "Technical NULL date for totals while business aggregation time is under review.",
+            "granularity": "day",
+            "dimension": {
+                "type": "time",
+                "config": annotation_config({}, self.name, totals_only=True),
+            },
+        }
+
+    def type_of(self, column: str, path: str) -> str:
+        try:
+            return physical_type(self.physical[column])
+        except ValueError as exc:
+            raise ValidationError(f"{path}: unsupported physical column type") from exc
+
+
+def time_mappings(instructions: dict, overrides: dict) -> tuple[dict[str, dict], list[str]]:
+    parsed: dict[str, dict] = {}
+    notes = []
+    for line in items(instructions.get("timeConventions", []), "instructions.timeConventions"):
+        match = CONVENTION.fullmatch(line) if isinstance(line, str) else None
+        if not match:
+            notes.append("Review the free-text time conventions in published-package.json.")
+            continue
+        key, source, session, grain, default = match.groups()
+        if key in parsed:
+            raise ValidationError(f"instructions.timeConventions.{key}: duplicate convention")
+        parsed[key] = {
+            "timezone": source if source == session else None,
+            "granularity": grain.lower(),
+            "default": default == "True",
+        }
+    for key, value in overrides.items():
+        mapping = record(value, f"time_mapping.{key}", "timezone granularity default")
+        if key in parsed and parsed[key] != mapping:
+            raise ValidationError(f"time_mapping.{key}: conflicts with the published convention")
+        parsed[key] = mapping
+        notes.append(
+            f"Confirm the supplied time mapping for {key} against the original business definition."
+        )
+    return parsed, notes
+
+
+def add_dimensions(table: Table, obj: dict, path: str, mappings: dict[str, dict]) -> None:
+    names: set[str] = set()
+    for section in ("dimensions", "timeDimensions"):
+        for original, dim in named(
+            obj.get(section, []), f"{path}.{section}", PACKAGE_ELEMENT_NAME
+        ).items():
+            location = f"{path}.{section}.{original}"
+            record(
+                dim,
+                location,
+                "name expr dataType description usageGuidance synonyms isEnum enumValues tags",
+            )
+            name = re.sub(r"_+", "_", original).rstrip("_")
+            if len(name) == 1 or name in RESERVED_DIMENSION_NAMES:
+                name = f"dim_{name}"
+            if len(name) > 63:
+                name = f"{name[:49].rstrip('_')}_{digest(original)[:12]}"
+            if name in names:
+                raise ValidationError(f"{location}: duplicate normalized dimension name")
+            names.add(name)
+            column = table.column_expression(dim.get("expr"), f"{location}.expr")
+            alias = table.view_column(column, location)
+            kind = table.type_of(column, location)
+            if dim.get("dataType") != kind:
+                raise ValidationError(
+                    f"{location}.dataType: declared {dim.get('dataType')!r} does not match live {kind}"
+                )
+            dimension: dict[str, Any] = {
+                "type": "time" if section == "timeDimensions" else "categorical",
+                "name": name,
+            }
+            lineage = {}
+            if name != original:
+                lineage["source_name"] = original
+            if alias != column:
+                lineage["source_column"] = column
+            config = annotation_config(dim, location, **lineage)
+            if config:
+                dimension["config"] = config
+            properties: dict[str, Any] = {"dimension": dimension}
+            if "description" in dim:
+                properties["description"] = description(dim["description"], name)
+            if section == "timeDimensions":
+                mapping = mappings.pop(f"{table.name}.{original}", None)
+                if mapping is None and kind != "DATE":
+                    raise ValidationError(
+                        f"{location}: supply a reviewed time_mapping for {table.name}.{original}"
+                    )
+                if mapping is not None and (
+                    kind not in ("DATE", "DATETIME", "TIMESTAMP")
+                    or mapping.get("timezone") != "UTC"
+                    or mapping.get("granularity") != "day"
+                    or not isinstance(mapping.get("default"), bool)
+                ):
+                    raise ValidationError(
+                        f"{location}: expected a DATE/TIMESTAMP-like column and a UTC day mapping"
+                    )
+                properties["granularity"] = "day"
+                table.times[original] = name
+                if mapping and mapping["default"]:
+                    if "agg_time_dimension" in table.model:
+                        raise ValidationError(f"{location}: multiple default aggregation times")
+                    table.model["agg_time_dimension"] = name
+            else:
+                if column in table.categorical:
+                    raise ValidationError(
+                        f"{location}: multiple categorical names for one filter column"
+                    )
+                table.categorical[column] = name
+            table.annotate(column, location, **properties)
+
+
+@dataclass(frozen=True)
+class Join:
+    fact: str
+    dimension: str
+    foreign_key: str
+    target_key: str
+    reversed_from_right: bool
+
+
+def normalized_joins(value: Any, bindings: dict[str, Binding]) -> list[Join]:
+    joins = []
+    edges: dict[str, set[str]] = {}
+    for name, obj in named(value, "approvedRelationships", RELATIONSHIP_NAME).items():
+        path = f"approvedRelationships.{name}"
+        record(
+            obj,
+            path,
+            "name leftTable rightTable relationshipCardinality joinType relationshipColumns "
+            "joinCondition source description usageGuidance relationshipId sourceDetail",
+        )
+        left = token(obj.get("leftTable"), f"{path}.leftTable", LOGICAL_NAME)
+        right = token(obj.get("rightTable"), f"{path}.rightTable", LOGICAL_NAME)
+        if left == right or left not in bindings or right not in bindings:
+            raise ValidationError(f"{path}: expected two distinct logical tables")
+        kind = (obj.get("joinType"), obj.get("relationshipCardinality"))
+        if kind not in (("LEFT", "MANY_TO_ONE"), ("RIGHT", "ONE_TO_MANY")):
+            raise ValidationError(
+                f"{path}: expected LEFT MANY_TO_ONE or equivalent RIGHT ONE_TO_MANY"
+            )
+        keys = items(obj.get("relationshipColumns"), f"{path}.relationshipColumns")
+        if len(keys) != 1:
+            raise ValidationError(f"{path}.relationshipColumns: expected one join key pair")
+        key = record(keys[0], f"{path}.relationshipColumns", "leftColumn rightColumn")
+        lhs, rhs = key.get("leftColumn"), key.get("rightColumn")
+        if not isinstance(lhs, str) or not isinstance(rhs, str):
+            raise ValidationError(f"{path}.relationshipColumns: expected column names")
+        if "joinCondition" in obj:
+            condition = scalar(obj["joinCondition"], f"{path}.joinCondition")
+            operands = (condition.this, condition.expression)
+            if (
+                not isinstance(condition, exp.EQ)
+                or not all(
+                    isinstance(col, exp.Column) and not col.db and not col.catalog
+                    for col in operands
+                )
+                or {(col.table, col.name) for col in operands} != {(left, lhs), (right, rhs)}
+            ):
+                raise ValidationError(
+                    f"{path}.joinCondition: expected exactly the declared key equality"
+                )
+        flipped = kind[0] == "RIGHT"
+        if flipped:
+            left, right, lhs, rhs = right, left, rhs, lhs
+        targets = edges.setdefault(left, set())
+        if right in targets:
+            raise ValidationError(
+                f"approvedRelationships: multiple joins from {left} to {right} require explicit role mappings"
+            )
+        targets.add(right)
+        joins.append(Join(left, right, lhs, rhs, flipped))
+
+    # MetricFlow can traverse two entity links. A repeated target would require a
+    # choice between paths (including paths that return to the source).
+    for source, direct in edges.items():
+        seen = {source}
+        pending = [(target, 1) for target in sorted(direct)]
+        while pending:
+            target, hops = pending.pop()
+            if target in seen:
+                raise ValidationError(
+                    f"approvedRelationships: cyclic or ambiguous path from {source} to {target}"
+                )
+            if hops > MAX_JOIN_HOPS:
+                raise ValidationError(
+                    f"approvedRelationships: path from {source} to {target} exceeds two hops"
+                )
+            seen.add(target)
+            pending.extend(
+                (next_target, hops + 1) for next_target in sorted(edges.get(target, set()))
+            )
+    return joins
+
+
+def add_relationships(tables: dict[str, Table], joins: list[Join]) -> None:
+    for join in joins:
+        left, right = tables[join.fact], tables[join.dimension]
+        path = f"approvedRelationships.{left.name}_to_{right.name}"
+        lhs = left.column(join.foreign_key, f"{path}.leftColumn")
+        rhs = right.column(join.target_key, f"{path}.rightColumn")
+        if rhs != right.key or left.physical[lhs].upper() != right.physical[rhs].upper():
+            raise ValidationError(
+                f"{path}: join keys must have the same live type and target the reviewed primary key"
+            )
+        left.annotate(lhs, path, entity={"type": "foreign", "name": right.entity})
+
+
+PREDICATES = (
+    exp.And,
+    exp.Or,
+    exp.Not,
+    exp.Paren,
+    exp.EQ,
+    exp.NEQ,
+    exp.LT,
+    exp.LTE,
+    exp.GT,
+    exp.GTE,
+    exp.In,
+    exp.Between,
+    exp.Is,
+)
+
+
+def render_filter(table: Table, obj: dict, path: str) -> str:
+    record(obj, path, "name sqlFragment applicableTables description usageGuidance")
+    if obj.get("applicableTables") != [table.name]:
+        raise ValidationError(f"{path}.applicableTables: expected the metric's base table only")
+    tree = scalar(obj.get("sqlFragment"), f"{path}.sqlFragment")
+    if not isinstance(tree, PREDICATES) or any(
+        not isinstance(
+            node, PREDICATES + (exp.Column, exp.Identifier, exp.Literal, exp.Null, exp.Boolean)
+        )
+        for node in tree.walk()
+    ):
+        raise ValidationError(f"{path}.sqlFragment: unsupported filter predicate")
+
+    def dimension(node: exp.Expression) -> exp.Expression:
+        if not isinstance(node, exp.Column):
+            return node
+        if (
+            node.table not in ("", table.name)
+            or node.db
+            or node.catalog
+            or node.name not in table.categorical
+        ):
+            raise ValidationError(
+                f"{path}.sqlFragment: filter must use local categorical dimensions"
+            )
+        return exp.Var(
+            this="{{ Dimension('" + table.entity + "__" + table.categorical[node.name] + "') }}"
+        )
+
+    return tree.transform(dimension).sql(dialect="hive")
+
+
+def add_measure(
+    name: str,
+    obj: dict,
+    tables: dict[str, Table],
+    filters: dict[str, dict],
+    used_filters: set[str],
+) -> tuple[str, str]:
+    path = f"metricDefinitions.{name}"
+    record(
+        obj,
+        path,
+        "name description visibility semanticType baseLogicalTable expr dataType "
+        "defaultAggregation timeDimension additivityType filterRefs caveats synonyms usageGuidance",
+    )
+    table = tables.get(
+        token(obj.get("baseLogicalTable"), f"{path}.baseLogicalTable", LOGICAL_NAME)
+    )
+    agg = token(obj.get("defaultAggregation"), f"{path}.defaultAggregation")
+    if table is None or agg not in AGGREGATIONS:
+        raise ValidationError(f"{path}: unsupported base table or aggregation")
+    if obj.get("timeDimension") is None:
+        time = table.model.get("agg_time_dimension")
+    else:
+        original_time = token(obj["timeDimension"], f"{path}.timeDimension", PACKAGE_ELEMENT_NAME)
+        time = table.times.get(original_time)
+    if time is None or "agg_time_dimension" not in table.model:
+        raise ValidationError(
+            f"{path}.timeDimension: supply a reviewed aggregation time or opt in to totals_only"
+        )
+    tree = scalar(obj.get("expr"), f"{path}.expr")
+    if not isinstance(tree, (exp.Column, exp.Coalesce)) or any(
+        not isinstance(node, (exp.Column, exp.Coalesce, exp.Identifier, exp.Literal, exp.Null))
+        for node in tree.walk()
+    ):
+        raise ValidationError(f"{path}.expr: expected a direct column or COALESCE expression")
+    types = set()
+
+    def project(ref: exp.Expression) -> exp.Expression:
+        if not isinstance(ref, exp.Column):
+            return ref
+        if ref.table not in ("", table.name) or ref.db or ref.catalog:
+            raise ValidationError(f"{path}.expr: expected columns on the metric's base table")
+        column = table.column(ref.name, f"{path}.expr")
+        types.add(table.type_of(column, f"{path}.expr"))
+        alias = table.view_column(column, path)
+        table.columns.setdefault(alias, {"name": alias})
+        return exp.column(alias)
+
+    tree = tree.transform(project)
+    if len(types) != 1:
+        raise ValidationError(f"{path}.expr: expected columns of a single physical type")
+    result_type = "BIGINT" if agg in ("COUNT", "COUNT_DISTINCT") else next(iter(types))
+    if obj.get("dataType") != result_type:
+        raise ValidationError(f"{path}.dataType: does not match expression and aggregation")
+    additivity = "ADDITIVE" if agg in ("SUM", "COUNT") else "NON_ADDITIVE"
+    if obj.get("additivityType", additivity) != additivity:
+        raise ValidationError(f"{path}.additivityType: conflicts with the supported aggregation")
+    metric: dict[str, Any] = {
+        "name": name,
+        "label": name,
+        "description": description(obj.get("description"), name),
+        "type": "simple",
+        "agg": AGGREGATIONS[agg],
+        "expr": tree.sql(dialect="hive"),
+        "agg_time_dimension": time,
+    }
+    predicates = []
+    for value in items(obj.get("filterRefs", []), f"{path}.filterRefs"):
+        ref_name = token(value, f"{path}.filterRefs", LOGICAL_NAME)
+        if ref_name not in filters:
+            raise ValidationError(f"{path}.filterRefs: filter {ref_name} is missing")
+        predicates.append(render_filter(table, filters[ref_name], f"namedFilters.{ref_name}"))
+        used_filters.add(ref_name)
+    if predicates:
+        metric["filter"] = (
+            predicates[0] if len(predicates) == 1 else " AND ".join(f"({p})" for p in predicates)
+        )
+    config = annotation_config(
+        obj, path, **({"visibility": "unspecified"} if "visibility" not in obj else {})
+    )
+    if config:
+        metric["config"] = config
+    table.model.setdefault("metrics", []).append(metric)
+    return table.name, time
+
+
+def add_ratio(
+    name: str, obj: dict, tables: dict[str, Table], measures: dict[str, tuple[str, str]]
+) -> None:
+    path = f"metricDefinitions.{name}"
+    record(
+        obj,
+        path,
+        "name description visibility semanticType derivedMetric additivityType caveats synonyms usageGuidance",
+    )
+    derived = record(
+        obj.get("derivedMetric"), f"{path}.derivedMetric", "formula refMetrics resultDataType"
+    )
+    refs = [
+        token(ref, f"{path}.derivedMetric.refMetrics", LOGICAL_NAME)
+        for ref in items(derived.get("refMetrics"), f"{path}.derivedMetric.refMetrics")
+    ]
+    formula = scalar(derived.get("formula"), f"{path}.derivedMetric.formula")
+    if (
+        len(refs) != 2
+        or any(ref not in measures for ref in refs)
+        or measures[refs[0]] != measures[refs[1]]
+        or derived.get("resultDataType") != "DOUBLE"
+        or obj.get("additivityType", "NON_ADDITIVE") != "NON_ADDITIVE"
+    ):
+        raise ValidationError(
+            f"{path}: expected a DOUBLE ratio of two simple metrics at the same grain"
+        )
+    numerator, denominator = refs
+    for first, second in ((numerator, denominator), (denominator, numerator)):
+        expected = exp.Div(
+            this=exp.column(first),
+            expression=exp.Nullif(this=exp.column(second), expression=exp.Literal.number(0)),
+            typed=False,
+            safe=False,
+        )
+        if formula.sql(dialect="hive") == expected.sql(dialect="hive"):
+            numerator, denominator = first, second
+            break
+    else:
+        raise ValidationError(
+            f"{path}.derivedMetric.formula: expected numerator / NULLIF(denominator, 0)"
+        )
+    metric: dict[str, Any] = {
+        "name": name,
+        "label": name,
+        "description": description(obj.get("description"), name),
+        "type": "ratio",
+        "numerator": numerator,
+        "denominator": denominator,
+    }
+    config = annotation_config(
+        obj, path, **({"visibility": "unspecified"} if "visibility" not in obj else {})
+    )
+    if config:
+        metric["config"] = config
+    tables[measures[numerator][0]].model["metrics"].append(metric)
+
+
+def convert(
+    document: dict,
+    bindings: dict[str, Binding],
+    metadata: dict[str, dict],
+    *,
+    entity_names: dict,
+    time_mapping: dict,
+    primary_keys: dict,
+    totals_only: list,
+    unkeyed_models: list,
+) -> tuple[dict[str, Table], list[str], int, int]:
+    content = document["content"]
+    semantic = content["semanticModel"]
+    instructions = record(content.get("instructions", {}), "instructions")
+    mappings, notes = time_mappings(instructions, time_mapping)
+    joins = normalized_joins(semantic.get("approvedRelationships", []), bindings)
+    unkeyed = {token(value, "unkeyed_models", LOGICAL_NAME) for value in unkeyed_models}
+    if unkeyed - bindings.keys():
+        raise ValidationError("unkeyed_models: contains a name outside logicalTables")
+    if unkeyed & {join.dimension for join in joins}:
+        raise ValidationError(
+            "unkeyed_models: approved relationship targets require a reviewed primary key"
+        )
+    if entity_names.keys() - bindings.keys():
+        raise ValidationError("entity_names: contains a name outside logicalTables")
+    if primary_keys.keys() - bindings.keys():
+        raise ValidationError("primary_keys: contains a name outside logicalTables")
+    totals = {token(value, "totals_only", LOGICAL_NAME) for value in totals_only}
+    if totals - bindings.keys():
+        raise ValidationError("totals_only: contains a name outside logicalTables")
+    entities = {
+        name: token(entity_names.get(name, name), f"entity_names.{name}", LOGICAL_NAME)
+        for name in bindings
+    }
+    if len(set(entities.values())) != len(entities):
+        raise ValidationError("entity_names: primary entity names must be unique")
+    tables: dict[str, Table] = {}
+    for table_doc in semantic["logicalTables"]:
+        name = table_doc["name"]
+        path = f"logicalTables.{name}"
+        obj = record(
+            table_doc,
+            path,
+            "name baseTable description primaryKey dimensions timeDimensions usageGuidance synonyms",
+        )
+        if name in unkeyed:
+            if "primaryKey" in obj or name in primary_keys:
+                raise ValidationError(
+                    f"unkeyed_models.{name}: conflicts with a declared or supplied key"
+                )
+            key = None
+            notes.append(
+                f"{name}: dimensions have a namespace without a primary key or key tests."
+            )
+        elif "primaryKey" in obj:
+            pk = record(obj["primaryKey"], f"{path}.primaryKey", "columns")
+            keys = items(pk.get("columns"), f"{path}.primaryKey.columns")
+            if len(keys) != 1:
+                raise ValidationError(f"{path}.primaryKey: expected one declared key column")
+            if name in primary_keys and primary_keys[name] != keys[0]:
+                raise ValidationError(f"primary_keys.{name}: conflicts with the published key")
+            key = keys[0]
+        else:
+            if name not in primary_keys:
+                raise ValidationError(
+                    f"{path}.primaryKey: supply a reviewed primary_keys.{name} column"
+                )
+            key = primary_keys[name]
+            notes.append(
+                f"{name}: verify the supplied primary key with the generated unique and not_null tests."
+            )
+        table = Table(
+            name,
+            entities[name],
+            key,
+            catalog_columns(metadata[name], bindings[name], path),
+            {
+                "name": name,
+                "description": description(obj.get("description"), name),
+                "semantic_model": {"enabled": True},
+            },
+        )
+        config = annotation_config(obj, path)
+        if config:
+            table.model["semantic_model"]["config"] = config
+        if name in unkeyed:
+            table.model["primary_entity"] = table.entity
+        else:
+            primary_key = table.column(key, f"{path}.primaryKey")
+            table.annotate(
+                primary_key,
+                path,
+                entity={"type": "primary", "name": table.entity},
+                data_tests=["unique", "not_null"],
+            )
+        add_dimensions(table, obj, path, mappings)
+        tables[name] = table
+    if mappings:
+        raise ValidationError(
+            "time_mapping/timeConventions: references an undeclared time dimension"
+        )
+    add_relationships(tables, joins)
+    right_joins = sum(join.reversed_from_right for join in joins)
+    if right_joins:
+        notes.append(
+            f"Converted {right_joins} RIGHT ONE_TO_MANY relationships to equivalent LEFT MANY_TO_ONE joins."
+        )
+    filters = named(semantic.get("namedFilters", []), "namedFilters")
+    metrics = named(content.get("metricDefinitions", []), "metricDefinitions")
+    if not metrics:
+        notes.append(
+            "The source package declares no metrics. Generated models retain its dimensions and relationships."
+        )
+    for name in sorted(totals):
+        table = tables[name]
+        declared = [
+            metric
+            for metric in metrics.values()
+            if metric.get("semanticType") == "MEASURE" and metric.get("baseLogicalTable") == name
+        ]
+        if (
+            not declared
+            or any(metric.get("timeDimension") is not None for metric in declared)
+            or "agg_time_dimension" in table.model
+        ):
+            raise ValidationError(
+                f"totals_only.{name}: requires measures without an assigned aggregation time"
+            )
+        table.add_totals_only_time()
+        notes.append(
+            f"{name}: totals-only queries use a technical NULL date. Confirm the business aggregation time before time-based use."
+        )
+    used_filters: set[str] = set()
+    measures = {}
+    for name, obj in metrics.items():
+        if "visibility" in obj and obj["visibility"] != "PUBLIC":
+            raise ValidationError(
+                f"metricDefinitions.{name}.visibility: expected PUBLIC when visibility is specified"
+            )
+        if "visibility" not in obj:
+            notes.append(f"{name}: the source did not specify metric visibility.")
+        if obj.get("semanticType") == "MEASURE":
+            measures[name] = add_measure(name, obj, tables, filters, used_filters)
+        elif obj.get("semanticType") != "CALCULATED_METRIC":
+            raise ValidationError(
+                f"metricDefinitions.{name}.semanticType: unsupported metric kind"
+            )
+    for name, obj in metrics.items():
+        if obj["semanticType"] == "CALCULATED_METRIC":
+            add_ratio(name, obj, tables, measures)
+    if any(metric.get("defaultAggregation") == "COUNT" for metric in metrics.values()):
+        notes.append(
+            "Check COUNT on empty inputs. The tested MetricFlow build returns NULL where SQL COUNT returns 0."
+        )
+    if filters.keys() - used_filters:
+        notes.append("Named filters unused by metrics remain in published-package.json.")
+    if TEXT_SECTIONS & content.keys():
+        notes.append(
+            "Review narrative business rules, guidance and examples in published-package.json before use."
+        )
+    for table in tables.values():
+        if not table.projection:
+            raise ValidationError(
+                f"logicalTables.{table.name}: no columns to project into the dbt model"
+            )
+        table.model["columns"] = list(table.columns.values())
+    return tables, sorted(set(notes)), len(metrics), len(joins)
