@@ -23,12 +23,15 @@ All three have to exist before `publish.yml` can get through:
    `github` / `aliyun` / `dbt-maxcompute` / `release.yml` until this file is used,
    then `publish.yml` (and the `pypi` environment as the branch filter). Update the
    PyPI publisher **before** the first manual run, otherwise the upload is rejected.
+4. The tag itself must carry the gate (see *Publishing a version*): `scripts/publish_gate.py`
+   and `tests/maxcompute_gating.py` have to exist in that checkout, or the run refuses to
+   publish rather than testing nothing.
 
 ## Publishing a version
 
 ```bash
-# 1. the release commit and tag are prepared as usual, then:
-gh workflow run publish.yml --repo aliyun/dbt-maxcompute -f tag=v1.12.1
+# 1. the release commit and tag are prepared as usual, then publish **that** tag:
+gh workflow run publish.yml --repo aliyun/dbt-maxcompute -f tag=v1.12.2
 gh run watch                                      # or: gh run list --workflow publish.yml
 
 # 2. verify what actually landed, from the outside:
@@ -39,8 +42,16 @@ rel = d["releases"]
 for v in sorted(rel)[-3:]:
     print(v, [u["upload_time_iso_8601"] for u in rel[v]])
 '
-gh release view v1.12.1 --repo aliyun/dbt-maxcompute
+gh release view v1.12.2 --repo aliyun/dbt-maxcompute
 ```
+
+Use the version number you actually tagged; `v1.12.2` above is a placeholder for "the next
+release". **Tags cut before this workflow existed are refused on purpose**: `v1.12.1` and
+earlier do not contain `scripts/publish_gate.py` or `tests/maxcompute_gating.py`, so the
+first step of the run stops with `that predates the publish gate`. That is not a bug to
+work around - re-publishing a pre-gate tag would mean shipping a version no run can prove
+was tested against a live MaxCompute project. To release one of those tags anyway, cut a
+new patch tag from a commit that carries the gate.
 
 ### What counts as verified
 
@@ -52,6 +63,10 @@ gh release view v1.12.1 --repo aliyun/dbt-maxcompute
   `upload_time_iso_8601` must be **later** than that job, not merely close to the run.
 * **The functional set ran.** The run summary of `Core, MaxFrame, and UDF Tests
   (required)` must show the pytest output, not a `NOT RUN` notice.
+* **Nothing was skipped silently.** `Require live evidence before anything downstream can
+  run` reads the functional JUnit report, not the exit code: it fails when a suite is
+  missing, when nothing passed, or when any case was skipped for a reason not listed with
+  `--allow-skip` - a suite that also has a passing case does not excuse that skip.
 
 A green-looking tag history is not evidence of a release: before this document
 existed, `release.yml` had 11 recorded runs (2026-03-03 through 2026-10-22), every

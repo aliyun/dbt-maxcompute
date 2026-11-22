@@ -13,8 +13,11 @@
 # can see what is being published.
 #
 # **when?**
-# Manually, from *Actions > Publish release (manual) > Run workflow*, with the tag
-# to publish (e.g. `v1.12.1`). Nothing here runs on a tag push.
+# Manually, from *Actions > Publish release (manual) > Run workflow*, with the tag to
+# publish - which has to be a tag that carries `scripts/publish_gate.py` and
+# `tests/maxcompute_gating.py`, because that is what makes "the live tests ran" provable.
+# Tags cut before the gate existed (e.g. `v1.12.1`) are refused by the first step rather
+# than published unverified. Nothing here runs on a tag push.
 
 name: Publish release (manual)
 
@@ -22,7 +25,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to publish, for example v1.12.1'
+        description: 'Tag to publish, e.g. the next release; tags before the gate existed are refused'
         required: true
         type: string
 

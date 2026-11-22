@@ -33,6 +33,24 @@ from typing import Dict, List, Optional, Sequence, Tuple
 _MARKERS = ("failure", "error", "skipped")
 
 
+def canonical(value: str) -> str:
+    """Put a suite reference into one comparable dotted form.
+
+    Needed because the two sides of the comparison are not spelled alike. pytest 9's
+    default JUnit family (``classes``) writes ``classname="tests.functional.test_core"``
+    and **no** ``file`` attribute, while a workflow argument is more readable as a path
+    (``tests/functional/test_core.py``). Comparing those with a plain substring test
+    rejects a genuinely passing report, which is exactly what this gate must never do:
+    a gate that only fires on the synthetic shape it was written against is a gate that
+    will be switched off the first time it cries wolf.
+    """
+    text = (value or "").strip().replace("\\", "/")
+    if text.endswith(".py"):
+        text = text[:-3]
+    text = text.replace("/", ".")
+    return text.lstrip(".")
+
+
 def _classify(case: ET.Element) -> Tuple[str, str]:
     """Return ``(state, reason)`` for one ``testcase`` element."""
     for marker in _MARKERS:
@@ -91,15 +109,37 @@ def evaluate(
             % (len(passed), min_passed, len(skipped))
         )
 
+    # A skip is only acceptable when it was allowed on purpose, and that judgement does
+    # not depend on whether the same suite happened to have another case pass: an
+    # unapproved skip sitting next to a pass is still a live test that never ran.
+    unapproved = [c for c in skipped if not _allowed(c, allowed_skips)]
+    if unapproved:
+        problems.append(
+            "%d skipped case(s) without an explicit --allow-skip: %s"
+            % (
+                len(unapproved),
+                "; ".join(
+                    "%s (%s)" % (_label(c), c["reason"][:60] or "no reason")
+                    for c in unapproved[:5]
+                ),
+            )
+        )
+
     for token in required:
         mine = [c for c in cases if _matches(c, token)]
         if not mine:
-            problems.append("required suite %r produced no result at all" % token)
+            seen = sorted({ident for c in cases for ident in _case_ids(c)})
+            problems.append(
+                "required suite %r produced no result at all (report has %d case(s); suites present: %s)"
+                % (token, len(cases), ", ".join(seen[:5]) or "none")
+            )
             continue
         if not [c for c in mine if c["state"] == "passed"]:
-            only_skips = all(c["state"] == "skipped" for c in mine)
-            if only_skips and allowed_skips and all(_allowed(c, allowed_skips) for c in mine):
-                continue  # explicitly allowed capability skip
+            only_allowed_skips = all(
+                c["state"] == "skipped" and _allowed(c, allowed_skips) for c in mine
+            )
+            if only_allowed_skips:
+                continue  # explicitly allowed capability skip for the whole suite
             problems.append(
                 "required suite %r passed nothing (cases: %s)"
                 % (token, ", ".join("%s=%s" % (c["name"], c["state"]) for c in mine[:5]))
@@ -111,9 +151,26 @@ def _label(case: Dict[str, str]) -> str:
     return "%s::%s" % (case["classname"] or case["file"] or "?", case["name"])
 
 
+def _case_ids(case: Dict[str, str]) -> List[str]:
+    """Every canonical name this case is known by (classname, file, and the module part)."""
+    ids = []
+    for raw in (case.get("classname") or "", case.get("file") or ""):
+        if not raw:
+            continue
+        ids.append(canonical(raw))
+    return [i for i in ids if i]
+
+
 def _matches(case: Dict[str, str], token: str) -> bool:
-    haystack = "%s %s" % (case["classname"], case["file"])
-    return token in haystack
+    """Does this case belong to suite ``token``?
+
+    Matches the module itself and anything nested under it (``...test_core.TestFoo``),
+    but never a sibling whose name merely starts with the same letters.
+    """
+    want = canonical(token)
+    if not want:
+        return False
+    return any(ident == want or ident.startswith(want + ".") for ident in _case_ids(case))
 
 
 def _allowed(case: Dict[str, str], allowed_skips: Sequence[str]) -> bool:
