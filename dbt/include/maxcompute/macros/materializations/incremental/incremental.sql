@@ -1,5 +1,9 @@
 
 {% materialization incremental, adapter='maxcompute', supported_languages=['sql', 'python'] -%}
+  {% if adapter.is_external_catalog_project(this.database) %}
+    {% do return(mc_epv2_incremental(this.incorporate(type='table'), sql)) %}
+  {% endif %}
+
   {%- set language = model['language'] -%}
   {%- set build_code = compiled_code if language == 'python' else sql -%}
   {%- set raw_partition_by = config.get('partition_by', none) -%}

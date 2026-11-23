@@ -34,7 +34,9 @@
 
 
 {% macro maxcompute__apply_grants(relation, grant_config, should_revoke=True) %}
-    {{ adapter.get_odps_table_by_relation(relation, 10) }}
+    {% if not adapter.is_external_catalog_project(relation.database) %}
+        {{ adapter.get_odps_table_by_relation(relation, 10) }}
+    {% endif %}
     {% if grant_config %}
         {% if should_revoke %}
             {#-- We think previous grants may have carried over --#}

@@ -74,6 +74,7 @@ def _relation(name):
 def _build_adapter(monkeypatch, client, sleep_records, strict=None):
     adapter = MaxComputeAdapter.__new__(MaxComputeAdapter)
     adapter.get_odps_client = lambda: client
+    adapter._external_catalog = SimpleNamespace(is_bound=lambda client, project: False)
     monkeypatch.setattr(mc_impl.time, "sleep", lambda seconds: sleep_records.append(seconds))
     if strict is not None:
         adapter.config = SimpleNamespace(
