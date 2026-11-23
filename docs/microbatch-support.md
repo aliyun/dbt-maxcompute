@@ -83,9 +83,11 @@ rows a text selects - the subject of the next section - and `datetime` is the on
 only the suffix-free form.
 
 `date` does not appear above because no text in it compares: a `date` event column yields NULL
-against all three, so every batch selects nothing while the run still reports success. That is a
+against all three, so every batch selected nothing while the run still reported success. That was a
 different defect from this one - a silent empty target rather than a plan the server refuses - and it
-is refused at compile time below, because no rendering fix can tell the two types apart.
+is now refused where the batch predicate is built: the adapter asks the warehouse for the physical
+type of the relation being read (see the `date` section below), because no rendering fix can tell the
+two types apart.
 
 Two edges are kept visible rather than smoothed over:
 
