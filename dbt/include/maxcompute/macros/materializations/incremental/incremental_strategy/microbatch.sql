@@ -37,6 +37,11 @@
   {#-- DATE event column is not measured here; what is measured is that it never performs the  --#}
   {#-- DATE-versus-timestamp-text comparison this message describes. Anything other than      --#}
   {#-- an explicit 'python' keeps the check, so an unknown language fails closed.             --#}
+  {#-- It is *logged*, never `exceptions.warn`: dbt promotes a JinjaLogWarning to an error under   --#}
+  {#-- `--warn-error` / `warn_error_options` (see the dbt docs for exceptions.warn), so warning here --#}
+  {#-- would hand the YAML declaration back the power to stop a model - the over-refusal this        --#}
+  {#-- revision removes. Pinned by TestMicrobatchDeclarationSurvivesWarnError (live) and by the      --#}
+  {#-- unit file's no-`exceptions.warn` assertion.                                                   --#}
   {% if event_time is string and partition_by.auto_partition() and language != 'python' %}
     {% set event_field = event_time | replace("`", "") | trim | lower %}
     {% for i in range(partition_by.fields | length) %}
@@ -44,7 +49,7 @@
       {% set data_type = partition_by.data_types[i] | trim | lower %}
       {% if field == event_field and data_type == "date" %}
         {% set date_event_time_msg -%}
-The 'microbatch' strategy warns: this model declares a `date` event partition column.
+The 'microbatch' strategy notes (informational, this does not stop the model): it declares a `date` event partition column.
   `event_time`: {{ event_time }}
   `partition_by`: field {{ partition_by.fields[i] }} is declared data_type {{ partition_by.data_types[i] }}
 A batch is compared against a timestamp-shaped boundary ({{ event_time }} >= '2025-05-01
@@ -59,7 +64,7 @@ SELECT is measured to be too late - the batch is still empty and still reported 
 DATE->DATETIME is not a way out either (this warehouse refuses that cast), and neither is making the
 DATE column itself the partition key (MaxCompute partition keys must be BIGINT or STRING).
         {%- endset %}
-        {% do exceptions.warn(date_event_time_msg) %}
+        {% do log(date_event_time_msg, info=True) %}
       {% endif %}
     {% endfor %}
   {% endif %}

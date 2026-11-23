@@ -34,7 +34,7 @@ _MACRO_PATH = (
     Path(__file__).resolve().parents[2]
     / "dbt/include/maxcompute/macros/materializations/incremental/incremental_strategy/microbatch.sql"
 )
-_REASON = "warns: this model declares a `date` event partition column"
+_REASON = "notes (informational, this does not stop the model)"
 
 
 class _CompilerError(Exception):
@@ -75,14 +75,28 @@ def _validate(fields, data_types, event_time, granularity="day", batch_size="day
         auto_partition=auto_partition,
     )
     warned: list = []
+    logged: list = []
+
+    def _log(message, info=False, debug=False):
+        # dbt's global `log` takes the message positionally and `info`/`debug` as keywords; the stub
+        # keeps both so the cells can assert the level, not only the text.
+        logged.append((message, info, debug))
+
     template.render(
         partition_by=partition_by,
         batch_size=batch_size,
         event_time=event_time,
         language=language,
         exceptions=SimpleNamespace(raise_compiler_error=_raise_compiler_error, warn=warned.append),
+        log=_log,
     )
-    return warned
+    assert not warned, (
+        "the declaration-only diagnostic must not reach `exceptions.warn`: dbt escalates "
+        "JinjaLogWarning under --warn-error / warn_error_options, which would give a YAML "
+        "declaration the power to stop a model whose column is physically an instant"
+    )
+    assert all(info for _, info, _ in logged), [entry for entry in logged if not entry[1]]
+    return [message for message, _, _ in logged]
 
 
 def test_macro_source_is_found():
@@ -90,14 +104,15 @@ def test_macro_source_is_found():
 
 
 @pytest.mark.parametrize("event_field", ["event_date", "`event_date`", "EVENT_DATE"])
-def test_a_declared_date_event_column_warns_and_does_not_stop_the_model(event_field):
+def test_a_declared_date_event_column_is_logged_and_does_not_stop_the_model(event_field):
     """A declaration is not the authority any more, so it cannot stop a model on its own.
 
     The refusal for a real `DATE` column lives in the adapter's filter path, where the warehouse can
     be asked; this check only says early, in the model's own terms, that the shape is known-broken.
-    Asserting the *absence* of an error here is the point: the case this guard used to refuse -
-    a physically instant column declared `date`, which is what the real `ref()` path produces when
-    YAML and the table disagree - has to compile.
+    Two absences are the point: no error (the case this guard used to refuse - a physically
+    instant column declared `date`, which is what the real `ref()` path produces when YAML and the
+    table disagree - has to compile) and no `exceptions.warn`, because an escalable warning is
+    only one CLI flag away from being that same error again.
     """
     warned = _validate(["event_date"], ["date"], event_field)
     assert len(warned) == 1, warned
