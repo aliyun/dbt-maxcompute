@@ -29,6 +29,8 @@ from dbt_common.contracts.constraints import ConstraintType
 from dbt_common.exceptions import DbtRuntimeError, MacroArgTypeError
 from odps import ODPS
 from odps.errors import ODPSError, NoSuchObject
+from odps.types import Char, validate_value
+from odps.utils import escape_odps_string
 
 from dbt.adapters.maxcompute import MaxComputeConnectionManager
 from dbt.adapters.maxcompute.column import (
@@ -80,6 +82,7 @@ EXPAND_COLUMN_TYPES_MODES = {
 class MaxComputeConfig(AdapterConfig):
     partitionColumns: Optional[List[Dict[str, str]]] = None
     partitions: Optional[List[str]] = None
+    partition_values: Optional[Dict[str, str | int]] = None
 
     primaryKeys: Optional[List[Dict[str, str]]] = None
     sqlHints: Optional[Dict[str, str]] = None
@@ -231,6 +234,70 @@ class MaxComputeAdapter(SQLAdapter):
     @available.parse_none
     def is_external_catalog_project(self, database: str) -> bool:
         return self._external_catalog.is_bound(self.get_odps_client(), database)
+
+    @available
+    def epv2_partition_values(
+        self, partition_by: Optional[PartitionConfig], partition_values: Any
+    ) -> Dict[str, str]:
+        if partition_by is None or not partition_by.fields or partition_by.auto_partition():
+            raise DbtRuntimeError("EP v2 incremental models require static partition_by columns.")
+        if not isinstance(partition_values, dict) or not all(
+            isinstance(key, str) for key in partition_values
+        ):
+            raise DbtRuntimeError("EP v2 incremental models require a partition_values mapping.")
+        values = {key.lower(): value for key, value in partition_values.items()}
+        fields = partition_by.fields
+        if len(values) != len(partition_values) or sorted(values) != sorted(
+            field.lower() for field in fields
+        ):
+            raise DbtRuntimeError("partition_values must specify every partition_by column once.")
+        if any(type(value) not in (str, int) or value == "" for value in values.values()):
+            raise DbtRuntimeError("partition_values must contain nonempty strings or integers.")
+        return {field.lower(): str(values[field.lower()]) for field in fields}
+
+    @available
+    def epv2_new_partition_write(
+        self, relation: MaxComputeRelation, partition_values: Dict[str, str]
+    ) -> Tuple[List[str], List[str]]:
+        columns = self.get_columns_in_relation(relation)
+        partition_columns = [column for column in columns if column.is_partition]
+        if not partition_columns or [column.name.lower() for column in partition_columns] != list(
+            partition_values
+        ):
+            raise DbtRuntimeError(
+                f"EP v2 partition_by must match the partition columns of {relation} in order."
+            )
+        values = {}
+        fixed_char_fields = set()
+        assignments = []
+        for column in partition_columns:
+            key = column.name.lower()
+            if not (column.is_integer() or column.is_string()):
+                raise DbtRuntimeError(
+                    f"EP v2 does not support static partition column {key} of type {column.data_type}."
+                )
+            data_type = column.table_column.type
+            try:
+                value = str(validate_value(partition_values[key], data_type))
+            except (TypeError, ValueError) as exc:
+                raise DbtRuntimeError(
+                    f"Invalid partition_values entry for {key} of type {column.data_type}."
+                ) from exc
+            if isinstance(data_type, Char):
+                fixed_char_fields.add(key)
+                value = value.rstrip(" ")
+            values[key] = value
+            literal = value if column.is_integer() else f"'{escape_odps_string(value)}'"
+            assignments.append(f"{quote_ref(key)}={literal}")
+        self._external_catalog.require_new_partition(
+            self.get_odps_client(),
+            relation.project,
+            relation.schema or "default",
+            relation.identifier,
+            values,
+            fixed_char_fields,
+        )
+        return [column.name for column in columns if not column.is_partition], assignments
 
     @staticmethod
     def _python_udf_config_values(value: Any, field_name: str) -> Tuple[str, ...]:

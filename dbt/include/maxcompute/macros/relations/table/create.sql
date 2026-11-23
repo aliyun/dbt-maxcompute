@@ -175,52 +175,9 @@ _dbt_maxframe_execute(_dbt_maxframe_sink)
     {%- set sql_hints = config.get('sql_hints', none) -%}
     {%- set sql_header = merge_sql_hints_and_header(sql_hints, config.get('sql_header', none)) -%}
 
-    {%- set is_delta = is_transactional and primary_keys is not none and primary_keys|length > 0 -%}
-
     {% call statement('create_table', auto_begin=False) -%}
-        {{ sql_header if sql_header is not none }}
-        create table {{ relation.render() }} (
-            {% set contract_config = config.get('contract') %}
-            {% if contract_config.enforced and (not temporary) %}
-                {{ get_assert_columns_equivalent(sql) }}
-                {{ get_table_columns_and_constraints_without_brackets(partition_config) }}
-                {%- set sql = get_select_subquery(sql) %}
-            {%- else -%}
-                {{ get_table_columns(sql, primary_keys, partition_config, sql_header) }}
-            {%- endif -%}
-            {% if is_delta -%}
-                ,primary key(
-                {%- for pk in primary_keys -%}
-                    {{ pk }}{{ "," if not loop.last }}
-                {%- endfor -%})
-            {%- endif -%}
-            )
-            {% if partition_config -%}
-                {{ partition_by(partition_config) }}
-            {%- endif -%}
-            {% set extra_props = {} %}
-            {% if tblproperties %}
-                {% do extra_props.update(tblproperties) %}
-            {% endif %}
-            {% if is_transactional %}
-                {% do extra_props.update({"transactional": "true"}) %}
-                {% if is_delta %}
-                    {% do extra_props.update({"write.bucket.num": delta_table_bucket_num}) %}
-                {% endif %}
-            {% endif %}
-            {% if extra_props %}
-                tblproperties(
-                    {% for key, value in extra_props.items() %}
-                        "{{ key }}"="{{ value }}"{{ "," if not loop.last }}
-                    {% endfor %}
-                )
-            {% endif %}
-            {%- if lifecycle %}
-                LIFECYCLE {{ lifecycle }}
-            {%- elif temporary %}
-                LIFECYCLE 1
-            {%- endif %}
-            ;
+        {{ mc_create_table_ddl(relation, sql, partition_config, lifecycle, tblproperties, sql_header,
+                               temporary, is_transactional, primary_keys, delta_table_bucket_num) }}
     {%- endcall -%}
     {{ sql_header if sql_header is not none }}
     insert into {{ relation.render() }}
@@ -234,6 +191,55 @@ _dbt_maxframe_execute(_dbt_maxframe_sink)
     )(
         {{ sql }}
     );
+{%- endmacro %}
+
+
+{% macro mc_create_table_ddl(relation, sql, partition_config, lifecycle, tblproperties, sql_header,
+                             temporary=false, is_transactional=false, primary_keys=none, delta_table_bucket_num=16) -%}
+    {%- set is_delta = is_transactional and primary_keys is not none and primary_keys|length > 0 -%}
+
+    {{ sql_header if sql_header is not none }}
+    create table {{ relation.render() }} (
+        {% set contract_config = config.get('contract') %}
+        {% if contract_config.enforced and (not temporary) %}
+            {{ get_assert_columns_equivalent(sql) }}
+            {{ get_table_columns_and_constraints_without_brackets(partition_config) }}
+        {%- else -%}
+            {{ get_table_columns(sql, primary_keys, partition_config, sql_header) }}
+        {%- endif -%}
+        {% if is_delta -%}
+            ,primary key(
+            {%- for pk in primary_keys -%}
+                {{ pk }}{{ "," if not loop.last }}
+            {%- endfor -%})
+        {%- endif -%}
+        )
+        {% if partition_config -%}
+            {{ partition_by(partition_config) }}
+        {%- endif -%}
+        {% set extra_props = {} %}
+        {% if tblproperties %}
+            {% do extra_props.update(tblproperties) %}
+        {% endif %}
+        {% if is_transactional %}
+            {% do extra_props.update({"transactional": "true"}) %}
+            {% if is_delta %}
+                {% do extra_props.update({"write.bucket.num": delta_table_bucket_num}) %}
+            {% endif %}
+        {% endif %}
+        {% if extra_props %}
+            tblproperties(
+                {% for key, value in extra_props.items() %}
+                    "{{ key }}"="{{ value }}"{{ "," if not loop.last }}
+                {% endfor %}
+            )
+        {% endif %}
+        {%- if lifecycle %}
+            LIFECYCLE {{ lifecycle }}
+        {%- elif temporary %}
+            LIFECYCLE 1
+        {%- endif %}
+        ;
 {%- endmacro %}
 
 

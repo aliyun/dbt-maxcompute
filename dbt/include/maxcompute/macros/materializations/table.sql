@@ -1,5 +1,9 @@
 {% materialization table, adapter='maxcompute', supported_languages=['sql', 'python'] %}
 
+  {% if adapter.is_external_catalog_project(this.database) %}
+    {% do return(mc_epv2_create_relation(this.incorporate(type='table'), compiled_code)) %}
+  {% endif %}
+
   {%- set language = model['language'] -%}
   {%- set lifecycle = config.get('lifecycle', none) -%}
   {%- set tblproperties = config.get('tblproperties', none) -%}
