@@ -1,14 +1,42 @@
 # **what?**
-# Publishes the package to PyPI when a new tag is pushed.
-# Also creates a GitHub Release with release notes.
-
+# Runs the release checks for a pushed tag: unit tests, the Core / Python-model /
+# UDF functional set when MaxCompute credentials are configured, and a package
+# build with `twine`-style metadata checks.
+#
+# Publishing to PyPI and creating the GitHub Release live in
+# `.github/workflows/publish.yml`, which is run by hand on purpose.
+#
 # **why?**
-# Automate the release process for dbt-maxcompute.
-
+# Two public facts about the previous version of this file:
+#
+# * It was named `Publish to PyPI`, and its `publish-pypi` job declared
+#   `environment: pypi` with trusted publishing (`id-token: write`).
+# * Every recorded run of it - 11 in total, 2026-03-03 through 2026-10-22, one per
+#   pushed tag - ended `completed/failure` at the step
+#   `Prepare MaxCompute test profile`, because the first command there is
+#   `test -n "$DBT_PROFILE_YAML"` and the repository secret is not configured.
+#   `Build distribution`, `Publish to PyPI` and `Create GitHub Release` were
+#   `skipped` in all of them.
+#
+# So the tag path never published anything, and a red run there said nothing about
+# the code being tagged - while releases kept appearing on PyPI and as GitHub
+# Releases, uploaded from outside this workflow. The name promised automation that
+# did not exist, and the gate blocked nothing.
+#
+# This file now reports what it can actually prove and marks the rest as NOT RUN,
+# in the same shape as the existing `gate` job in `.github/workflows/integration.yml`.
+# The publish path moved to a deliberate, human-triggered run where the functional
+# gate is *required*: publishing without live MaxCompute evidence stays impossible,
+# and a tag push without the secret is no longer reported as a failed release.
+#
+# If the project later decides that a tag push should publish automatically, that is
+# one trigger line plus configuring the secret and the `pypi` environment - the
+# capability is kept intact in `publish.yml`, not deleted here.
+#
 # **when?**
 # This will run when a tag matching 'v*' is pushed (e.g., v1.0.0, v1.0.0a1).
 
-name: Publish to PyPI
+name: Release checks on tag
 
 on:
   push:
@@ -16,8 +44,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
-  id-token: write  # Required for trusted publishing to PyPI
+  contents: read
 
 defaults:
   run:
@@ -28,6 +55,9 @@ jobs:
     name: Core, MaxFrame, and UDF Tests
 
     runs-on: ubuntu-latest
+
+    outputs:
+      functional_ran: ${{ steps.profile.outputs.can_run }}
 
     steps:
       - name: Check out the repository
@@ -49,19 +79,36 @@ jobs:
           dbt --version
 
       - name: Prepare MaxCompute test profile
+        id: profile
         env:
           DBT_PROFILE_YAML: ${{ secrets.DBT_PROFILE_YAML }}
         run: |
-          test -n "$DBT_PROFILE_YAML"
+          set -uo pipefail
+          if [ -z "$DBT_PROFILE_YAML" ]; then
+            echo "can_run=false" >> "$GITHUB_OUTPUT"
+            {
+              echo ""
+              echo "## release functional tests: NOT RUN"
+              echo ""
+              echo "- The repository secret \`DBT_PROFILE_YAML\` is not configured, so no SQL will run."
+              echo "- **This is not a live MaxCompute pass.** The unit suite below still runs."
+              echo "- See docs/integration-tests.md for what the release functional set covers,"
+              echo "  and docs/releasing.md for how to publish once it can run."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "DBT_PROFILE_YAML is not configured: functional steps will be skipped"
+            exit 0
+          fi
           profile_path="$RUNNER_TEMP/dbt_profile.yml"
           printf '%s\n' "$DBT_PROFILE_YAML" > "$profile_path"
           chmod 600 "$profile_path"
           echo "DBT_PROFILE_PATH=$profile_path" >> "$GITHUB_ENV"
+          echo "can_run=true" >> "$GITHUB_OUTPUT"
 
       - name: Run unit tests
         run: pytest tests/unit tests/unit_test -q
 
       - name: Run release functional tests
+        if: steps.profile.outputs.can_run == 'true'
         run: >-
           pytest
           tests/functional/test_core.py
@@ -108,77 +155,3 @@ jobs:
           name: dist
           path: dist/
           overwrite: true
-
-  publish-pypi:
-    name: Publish to PyPI
-
-    needs: build
-
-    runs-on: ubuntu-latest
-
-    environment:
-      name: pypi
-      url: https://pypi.org/p/dbt-maxcompute
-
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-
-  create-github-release:
-    name: Create GitHub Release
-
-    needs: publish-pypi
-
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check out the repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-      - name: Get version from tag
-        id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Generate release notes
-        id: release_notes
-        run: |
-          # Get the previous tag
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-
-          if [ -n "$PREV_TAG" ]; then
-            echo "RELEASE_NOTES<<EOF" >> $GITHUB_OUTPUT
-            echo "## Changes since ${PREV_TAG}" >> $GITHUB_OUTPUT
-            echo "" >> $GITHUB_OUTPUT
-            git log ${PREV_TAG}..HEAD --oneline --pretty=format:"- %s (%h)" >> $GITHUB_OUTPUT
-            echo "" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          else
-            echo "RELEASE_NOTES<<EOF" >> $GITHUB_OUTPUT
-            echo "## Initial Release" >> $GITHUB_OUTPUT
-            echo "" >> $GITHUB_OUTPUT
-            git log --oneline --pretty=format:"- %s (%h)" | head -20 >> $GITHUB_OUTPUT
-            echo "" >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ steps.get_version.outputs.VERSION }}
-          body: ${{ steps.release_notes.outputs.RELEASE_NOTES }}
-          files: dist/*
-          draft: false
-          prerelease: ${{ contains(steps.get_version.outputs.VERSION, 'a') || contains(steps.get_version.outputs.VERSION, 'b') || contains(steps.get_version.outputs.VERSION, 'rc') }}
-          generate_release_notes: false
