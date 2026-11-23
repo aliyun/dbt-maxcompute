@@ -8,8 +8,10 @@ from dbt.adapters.contracts.relation import RelationType
 from dbt_common.exceptions import DbtRuntimeError
 from odps.errors import ODPSError
 
+from dbt.adapters.maxcompute import external_catalog
 from dbt.adapters.maxcompute.external_catalog import ExternalCatalogMetadata
 from dbt.adapters.maxcompute.impl import MaxComputeAdapter
+from dbt.adapters.maxcompute.relation_configs._partition import PartitionConfig
 
 
 PROJECT = "lake_project"
@@ -182,3 +184,87 @@ def test_invalid_list_payload_does_not_hide_catalog_objects(adapter_and_client):
     _return_result(client, "unexpected output")
     with pytest.raises(DbtRuntimeError, match="Missing schema_name"):
         adapter.list_schemas(PROJECT)
+
+
+def test_partition_values_use_column_order(adapter_and_client):
+    adapter, _ = adapter_and_client
+    config = PartitionConfig(fields=["ds", "region"])
+    result = adapter.epv2_partition_values(config, {"region": "cn", "DS": "2026-11-23"})
+    assert list(result.items()) == [("ds", "2026-11-23"), ("region", "cn")]
+
+
+@pytest.mark.parametrize("values", [None, {}, {"ds": None}, {"ds": True}, {"ds": "", "DS": "a"}])
+def test_incomplete_or_ambiguous_epv2_partition_values_are_rejected(adapter_and_client, values):
+    adapter, _ = adapter_and_client
+    with pytest.raises(DbtRuntimeError, match="partition_values"):
+        adapter.epv2_partition_values(PartitionConfig(fields=["ds"]), values)
+
+
+def test_epv2_overwrite_requires_a_fresh_lookup_with_no_matching_partition(adapter_and_client):
+    adapter, client = adapter_and_client
+    relation = adapter.Relation.create(database=PROJECT, schema=SCHEMA, identifier=TABLE)
+    values = {"ds": "2026-11-23", "region": "us"}
+    metadata = _description()
+    metadata["PartitionColumns"].append({"Name": "region", "Type": "STRING"})
+    for result, expected_error in [
+        ('"ds=2026-11-23/region=cn"\n\n', False),
+        ('"ds=2026-11-23/region=cn"\n"ds=2026-11-23/region=us"\n\n', True),
+    ]:
+        client.execute_sql.return_value.get_task_results.side_effect = [
+            {"AnonymousSQLTask": json.dumps(metadata)},
+            {"AnonymousSQLTask": result},
+        ]
+        if expected_error:
+            with pytest.raises(DbtRuntimeError, match="only write new partitions"):
+                adapter.epv2_new_partition_write(relation, values)
+        else:
+            assert adapter.epv2_new_partition_write(relation, values) == (
+                ["amount", "memo"],
+                ["`ds`='2026-11-23'", "`region`='us'"],
+            )
+        assert client.execute_sql.call_args.args == ("SHOW PARTITIONS `orders`",)
+
+
+def test_numeric_partition_values_use_the_canonical_key(adapter_and_client):
+    adapter, client = adapter_and_client
+    metadata = _description()
+    metadata["PartitionColumns"] = [{"Name": "version", "Type": "BIGINT"}]
+    relation = adapter.Relation.create(database=PROJECT, schema=SCHEMA, identifier=TABLE)
+    for listing in ("\n", '"version=1"\n\n'):
+        client.execute_sql.return_value.get_task_results.side_effect = [
+            {"AnonymousSQLTask": json.dumps(metadata)},
+            {"AnonymousSQLTask": listing},
+        ]
+        values = {"version": "001"}
+        if listing.strip():
+            with pytest.raises(DbtRuntimeError, match="already exists"):
+                adapter.epv2_new_partition_write(relation, values)
+        else:
+            assert adapter.epv2_new_partition_write(relation, values)[1] == ["`version`=1"]
+
+
+@pytest.mark.parametrize(
+    "listing,error",
+    [("invalid\n", "Invalid SHOW PARTITIONS"), ('"ds=old"\n', "partition query limit")],
+)
+def test_unverifiable_partition_listing_blocks_writes(
+    adapter_and_client, monkeypatch, listing, error
+):
+    adapter, client = adapter_and_client
+    monkeypatch.setattr(external_catalog, "_PARTITION_LIST_LIMIT", 1)
+    relation = adapter.Relation.create(database=PROJECT, schema=SCHEMA, identifier=TABLE)
+    client.execute_sql.return_value.get_task_results.side_effect = [
+        {"AnonymousSQLTask": json.dumps(_description())},
+        {"AnonymousSQLTask": listing},
+    ]
+    with pytest.raises(DbtRuntimeError, match=error):
+        adapter.epv2_new_partition_write(relation, {"ds": "new"})
+
+
+def test_epv2_write_rejects_partition_config_inconsistent_with_target(adapter_and_client):
+    adapter, client = adapter_and_client
+    relation = adapter.Relation.create(database=PROJECT, schema=SCHEMA, identifier=TABLE)
+    _return_result(client, json.dumps(_description()))
+    with pytest.raises(DbtRuntimeError, match="must match the partition columns"):
+        adapter.epv2_new_partition_write(relation, {"region": "cn"})
+    client.execute_sql.assert_called_once()
