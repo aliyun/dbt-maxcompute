@@ -72,6 +72,19 @@ def test_backoff_caps_the_delay_and_shares_the_submission_limit(execution):
     assert sleep.call_args_list == [call(delay) for delay in [15, 30, 60, 120, *([240] * 5)]]
 
 
+def test_epv2_write_opt_out_prevents_resubmission_of_failed_statement(execution):
+    cursor, odps, sleep, _ = execution
+    error = ODPSError("ODPS-0110061: failed to overwrite", code="ODPS-0110061")
+    odps.execute_sql.side_effect = error
+    sql = "SET dbt.retry=false;\nINSERT OVERWRITE TABLE t PARTITION(ds='2026-11-23') SELECT 1;"
+    with pytest.raises(ODPSError) as caught:
+        cursor.execute(sql)
+    assert caught.value is error
+    odps.execute_sql.assert_called_once()
+    assert "dbt.retry" not in odps.execute_sql.call_args.kwargs["hints"]
+    sleep.assert_not_called()
+
+
 @pytest.mark.parametrize("status", ["missing_id", "running", "succeeded", "lookup_failed"])
 def test_does_not_replay_an_unconfirmed_abort(execution, status):
     cursor, odps, sleep, jitter = execution

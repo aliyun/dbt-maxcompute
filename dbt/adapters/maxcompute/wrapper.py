@@ -2,7 +2,7 @@ import copy
 import random
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 from dbt.adapters.events.logging import AdapterLogger
@@ -63,7 +63,10 @@ class CursorWrapper(Cursor):
     def execute(self, operation, parameters=None, **kwargs):
         result = SettingParser.parse(operation)
         effective_maxqa = self._resolve_maxqa(result.settings)
-        max_submissions = 10
+        retry = result.settings.pop("dbt.retry", "true") != "false"
+        max_submissions = 10 if retry else 1
+        if effective_maxqa and not retry:
+            effective_maxqa = replace(effective_maxqa, fallback=False)
         merge_retries = 0
         for submission in range(1, max_submissions + 1):
             try:

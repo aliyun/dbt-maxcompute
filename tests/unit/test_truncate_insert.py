@@ -59,6 +59,7 @@ def _context(values=None, existing=TARGET, full_refresh=False, partitioned=False
     events = []
     columns = [SimpleNamespace(name="id"), SimpleNamespace(name="value")]
     adapter = SimpleNamespace(
+        is_external_catalog_project=lambda database: False,
         parse_partition_by=lambda value: value,
         get_odps_table_by_relation=lambda relation: SimpleNamespace(
             type=Table.Type.MANAGED_TABLE,
