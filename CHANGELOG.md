@@ -161,8 +161,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     end before narrowing the rule);
   * the type used is the column's **physical** type on the relation being read,
     not the type a YAML property declares - measured both ways, a declaration
-    that disagrees with the column picks the wrong clock in both directions.
-    The declaration is a fallback for when the warehouse cannot be asked;
+    that disagrees with the column picks the wrong clock in both directions. The declaration is
+    never consulted for the clock: when the warehouse cannot be asked there is no second authority
+    to fall back on, so the batch is refused rather than guessed, and what a declaration buys is an
+    informational note on the console - logged, not warned, because dbt escalates a JinjaLogWarning
+    to an error under `--warn-error` and that would put the YAML back in charge of the run;
   * on a non-UTC session, a batch whose window cannot be stated on a verifiable
     type now fails instead of guessing, as does a batch whose two boundaries
     collapse to the same wall clock inside a daylight-saving fold - both used to
@@ -174,8 +177,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Microbatch **SQL** models whose event column is physically a `date` are now refused when the batch
   predicate is built, instead of running empty; the decision asks the warehouse for the type of the
-  relation being filtered, so a `date` *declaration* over an instant upstream only warns and still
-  writes its rows, and MaxFrame Python models are left alone because they bind their window in
+  relation being filtered, so a `date` *declaration* over an instant upstream only leaves a note and
+  still writes its rows - under `--warn-error` too, and MaxFrame Python models are left alone because they bind their window in
   Python rather than comparing a boundary text to the column. dbt-core compares each batch against a timestamp-shaped
   boundary (`event_time >= '2025-05-01 00:00:00'` since #40, with an offset before it), and
   MaxCompute evaluates a `DATE` against either text as `NULL` rather than raising: every batch

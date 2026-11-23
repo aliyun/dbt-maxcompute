@@ -108,7 +108,7 @@ Two edges are kept visible rather than smoothed over:
 | --- | --- | --- |
 | no `partition_by` | rejected: "The 'microbatch' strategy requires a `partition_by` config." | this adapter |
 | the column being filtered is physically `date`, SQL model | rejected before any write, on UTC and shifted sessions alike: the batch names the `date` column and states why nothing was written | this adapter |
-| `event_time` declared as `partition_by.data_type: date` while the physical type is an instant | **warned and still runs**; a declaration is an early diagnostic, never the authority | this adapter |
+| `event_time` declared as `partition_by.data_type: date` while the physical type is an instant | **logged and still runs**, `--warn-error` included; a declaration is an early diagnostic, never the authority | this adapter |
 | the type could not be read (`{}` from the describe) | refused when the session would move the window; left as dbt-core's rendering on a session that would not - that path is *unverified*, not DATE-safe | this adapter |
 | the same declaration on a MaxFrame Python model | **accepted**; the window is bound in Python instead (see below) | nobody |
 | `partition_by.granularity` != `batch_size` | rejected: "requires a `partition_by` config with the same granularity as its configured `batch_size`" | this adapter |
@@ -188,14 +188,18 @@ partitions, and replaying the first window does not erase the second.
 Two shapes that look like fixes and are measured not to be:
 
 * a `cast()` inside the microbatch model's own SELECT - the batch predicate was already applied to
-  the upstream DATE column, so the target is still empty and the run still succeeds;
+  the upstream DATE column, so it cannot rescue the window. Before this change that shape wrote an
+  empty target behind a successful run; now it is refused with the physical-type error (measured,
+  `TestMicrobatchCastInsideModelIsRefused`);
 * `cast(event_date as datetime)`, and making the DATE column itself the partition key. This
   warehouse refuses the DATE->DATETIME cast, and partition keys must be `BIGINT` or `STRING`.
 
-The refusal catches the shape the adapter can see - the model that declares its event field as a
-`date` partition column. An *upstream* relation whose `event_time` column is a DATE is not visible
-from here (only the field name reaches the rendering point) and stays silent; that residual is
-pinned as a failing-behaviour test rather than left to be rediscovered.
+The refusal is not limited to the model that declares its event field as a `date` partition column -
+that declaration is only the informational note. The authority asks the warehouse for the type of the
+relation the window is attached to, so an *upstream* relation whose `event_time` column is physically
+a DATE is caught as well: behind a `ref()` (the staged-instant and cast-inside-model cells) and behind
+a `source()` on a shifted session with different event and partition names, where no declaration-level
+check could have fired at all. What is left unmeasured is stated in *Not verified here*.
 
 The workaround is measured on the adapter's default session (`timezone` unset, so
 `odps.sql.timezone=Etc/GMT`). Under a profile that sets `timezone`, the DATE->TIMESTAMP reading is
@@ -382,8 +386,10 @@ fails this way, dbt reports the model with the message `ERROR` and the exception
 the console at all - it was visible only by intercepting the raise. So each refusal is logged at error
 level too (the channel this adapter's other messages use, which the console does show), and a unit
 case asserts the logged text is the raised text for all three refusals - and that an ordinary aligned
-window logs nothing at that level. A declaration that is declined is said at warning level too, and
-named in the refusal, so the user can see which claim was not trusted and why.
+window logs nothing at that level. A declaration the resolver declined to trust is named in the
+refusal, and the config-level note about it is logged at info level rather than through
+`exceptions.warn` - dbt escalates the latter to an error under `--warn-error`, which would give a YAML
+property the veto this adapter deliberately takes away from it.
 
 
 ## Not verified here
