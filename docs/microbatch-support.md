@@ -420,11 +420,14 @@ property the veto this adapter deliberately takes away from it.
   project is the ephemeral shape specifically - the live probe used a missing upstream relation
   instead: describe retried three times, the batch errored at ~30s, and the reason was the
   unverifiable-clock message rather than a guess;
-- `source()`-based event-time upstreams are a committed cell now: a Shanghai session, a physically
+- `source()`-based event-time upstreams are committed cells now: a Shanghai session, a physically
   `timestamp` table declared `timestamp_ntz` in its source properties, the same four rows and the same
-  per-step partition assertions as the `ref()` cells. Not run as a cell: the other type branches
-  (`timestamp_ntz`, `datetime`, `date`) and the other sessions behind a `source()`, and a source whose
-  relation is missing - which the rule refuses;
+  per-step partition assertions as the `ref()` cells; and a physically `date` table behind a
+  `source()` on that shifted session with the event field named apart from the partition field
+  (`TestMicrobatchPhysicalDateSourceOnShiftedSession`) - on that shape no declaration-level check can
+  fire, so the refusal is the warehouse answer alone. Still not run as a cell: `timestamp_ntz` and
+  `datetime` behind a `source()`, the other sessions behind a `source()`, and a source whose relation
+  is missing - which the rule refuses;
 - the metadata call per batch is not benchmarked on projects with many upstream relations; what is
   pinned is that no answer is reused across decisions (unit cases: repeated renders ask again, a
   recreated relation with a new type follows the new answer, a failed lookup does not poison the next
