@@ -406,3 +406,137 @@ if __name__ == "__main__":  # pragma: no cover - lets a plain interpreter run th
                 failures += 1
                 print("FAIL", name, repr(exc))
     sys.exit(1 if failures else 0)
+
+
+# --------------------------------------------------------------------------------------
+# Review round 4 (issuecomment-7074272574): bind every job to one commit.
+#
+# The workflow asks a git question ("does this tag still identify the commit we tested?")
+# before it writes to PyPI and before it opens the GitHub Release. These cases build real
+# throwaway repositories, with real annotated and lightweight tags, and point the CLI at
+# them - a hand-written listing would test the parser against the shape someone guessed,
+# which is the mistake that produced the round-3 defect.
+# --------------------------------------------------------------------------------------
+
+GIT_ENV = {
+    "GIT_AUTHOR_NAME": "gate fixture",
+    "GIT_AUTHOR_EMAIL": "gate-fixture@example.invalid",
+    "GIT_COMMITTER_NAME": "gate fixture",
+    "GIT_COMMITTER_EMAIL": "gate-fixture@example.invalid",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_SYSTEM": "/dev/null",
+}
+
+
+def _git(repo, *args):
+    env = dict(os.environ)
+    env.update(GIT_ENV)
+    return subprocess.run(
+        ["git"] + list(args),
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def _git_repo(tmp):
+    """A repo with two commits: an annotated tag on the first, a lightweight tag too.
+
+    Returns ``(path, first_commit, second_commit)``.
+    """
+    repo = os.path.join(tmp, "repo")
+    os.makedirs(repo, exist_ok=True)
+    assert _git(repo, "init", "-q", "-b", "main", ".").returncode == 0
+    with open(os.path.join(repo, "f.txt"), "w", encoding="utf-8") as handle:
+        handle.write("one\n")
+    assert _git(repo, "add", "f.txt").returncode == 0
+    assert _git(repo, "commit", "-q", "-m", "first release commit").returncode == 0
+    first = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    assert _git(repo, "tag", "-a", "-m", "annotated", "v1.0.0", first).returncode == 0
+    assert _git(repo, "tag", "v1.0.0-lite", first).returncode == 0
+    with open(os.path.join(repo, "f.txt"), "a", encoding="utf-8") as handle:
+        handle.write("two\n")
+    assert _git(repo, "commit", "-q", "-am", "later commit").returncode == 0
+    second = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    return repo, first, second
+
+
+def _pin(repo, tag, expect):
+    return _run(["commit", "pin", "--url", repo, "--tag", tag, "--expect-sha", expect])
+
+
+def test_pin_accepts_the_peeled_commit_of_an_annotated_tag():
+    repo, first, _ = _git_repo(tempfile.mkdtemp(prefix="gate-pin-"))
+    result = _pin(repo, "v1.0.0", first)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "binding holds" in result.stdout
+
+
+def test_pin_refuses_a_moved_tag_instead_of_publishing_different_bytes():
+    repo, first, second = _git_repo(tempfile.mkdtemp(prefix="gate-pin-"))
+    assert _git(repo, "tag", "-f", "-a", "-m", "retagged", "v1.0.0", second).returncode == 0
+    result = _pin(repo, "v1.0.0", first)
+    assert result.returncode == 1, result.stdout + result.stderr
+    combined = result.stdout + result.stderr
+    assert "not the tested commit" in combined
+    assert second in combined and first in combined
+
+
+def test_pin_accepts_a_lightweight_tag_and_an_absent_tag_is_refused():
+    repo, first, _ = _git_repo(tempfile.mkdtemp(prefix="gate-pin-"))
+    assert _pin(repo, "v1.0.0-lite", first).returncode == 0
+    gone = _pin(repo, "v9.9.9-never", first)
+    assert gone.returncode == 1, gone.stdout + gone.stderr
+    assert "is not in the remote listing" in gone.stdout + gone.stderr
+
+
+def test_pin_refuses_an_unpinnable_expectation_rather_than_passing():
+    """The shape a job sees when an upstream output was never set: an empty string."""
+    repo, first, _ = _git_repo(tempfile.mkdtemp(prefix="gate-pin-"))
+    empty = _pin(repo, "v1.0.0", "")
+    assert empty.returncode == 2, empty.stdout + empty.stderr
+    assert "did not produce a commit" in empty.stdout + empty.stderr
+    short = _pin(repo, "v1.0.0", first[:12])
+    assert short.returncode == 2, short.stdout + short.stderr
+    assert "not a full 40-hex commit id" in short.stdout + short.stderr
+
+
+def test_head_assertion_reads_the_real_checkout():
+    tmp = tempfile.mkdtemp(prefix="gate-head-")
+    repo, first, second = _git_repo(tmp)
+    ok = _run(["commit", "head", "--cwd", repo, "--expect-sha", second])
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    refuse = _run(["commit", "head", "--cwd", repo, "--expect-sha", first])
+    assert refuse.returncode == 1, refuse.stdout + refuse.stderr
+    assert "not the pinned commit" in refuse.stdout + refuse.stderr
+
+
+def test_head_assertion_cannot_be_satisfied_by_a_non_repository():
+    empty = tempfile.mkdtemp(prefix="gate-notrepo-")
+    result = _run(["commit", "head", "--cwd", empty, "--expect-sha", "0" * 40])
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "git rev-parse HEAD failed" in result.stdout + result.stderr
+
+
+def test_parse_peel_prefers_the_peeled_line_like_github_returns_it():
+    gate = _gate()
+    obj = "1" * 40
+    commit = "2" * 40
+    # GitHub answers with two lines for an annotated tag; a line that is not
+    # "<40-hex>\t<ref>" is noise and must not be mistaken for a candidate.
+    listing = "not-a-listing-line\n"
+    listing += "%s\trefs/tags/v1.0.0\n%s\trefs/tags/v1.0.0^{}\n" % (obj, commit)
+    got, kind, problems = gate.parse_peel(listing)
+    assert problems == []
+    assert kind == "peeled" and got == commit
+
+
+def test_parse_peel_refuses_ambiguity_and_absence():
+    gate = _gate()
+    two = "refs/tags/v1.0.0\t%s\n" % ("a" * 40)
+    two += "%s\trefs/tags/v1.0.0\n%s\trefs/tags/v1.0.0\n" % ("b" * 40, "c" * 40)
+    got, kind, problems = gate.parse_peel(two)
+    assert got is None and kind == "ambiguous" and problems
+    got, kind, problems = gate.parse_peel("")
+    assert got is None and kind == "absent" and problems

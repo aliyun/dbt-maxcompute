@@ -46,6 +46,7 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       sha: ${{ steps.resolve.outputs.sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
 
     steps:
@@ -56,7 +57,9 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
-          if [[ ! "$TAG" =~ ^v[0-9] ]]; then
+          # Anchored both ends: the tag name is later interpolated into run scripts and
+          # used as a release label, so nothing beyond a version suffix may ride on it.
+          if [[ ! "$TAG" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]]; then
             echo "::error::tag '$TAG' does not look like a release tag (expected v<semver>)"
             exit 1
           fi
@@ -106,22 +109,32 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out the tag
+      # Every job checks out the commit preflight peeled off the tag, never the tag name.
+      # A tag can be re-pointed while a run is in flight; if it is, the bytes that get
+      # published are not the bytes that were tested, and no job downstream would notice.
+      - name: Check out the pinned commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ needs.preflight.outputs.sha }}
           persist-credentials: false
 
       - name: Require the publish gate in this checkout
+        env:
+          PINNED_SHA: ${{ needs.preflight.outputs.sha }}
         run: |
           set -uo pipefail
           for required in scripts/publish_gate.py tests/maxcompute_gating.py; do
             if [ ! -f "$required" ]; then
-              echo "::error::$required is absent from ${{ inputs.tag }}: that predates the publish gate"
+              echo "::error::$required is absent from $PINNED_SHA: that predates the publish gate"
               echo "          Refusing to publish from a tag that cannot prove live evidence."
               exit 1
             fi
           done
+
+      - name: Assert this checkout is the pinned commit
+        env:
+          PINNED_SHA: ${{ needs.preflight.outputs.sha }}
+        run: python scripts/publish_gate.py commit head --expect-sha "$PINNED_SHA"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -184,7 +197,15 @@ jobs:
       - name: Require live evidence before anything downstream can run
         run: |
           set -uo pipefail
-          python scripts/publish_gate.py functional --xml report-unit.xml --min-passed 1
+          # Unit-test skips are environment-shaped (optional dependency absent, library
+          # layout differs), so each accepted reason is named here. An unexplained skip
+          # still fails the run, and the functional report below has no allowlist at all.
+          python scripts/publish_gate.py functional --xml report-unit.xml --min-passed 1 \
+            --allow-skip "alibabacloud-credentials not importable" \
+            --allow-skip "legacy get_credentials() shape" \
+            --allow-skip "real client failed differently" \
+            --allow-skip "credentials resolve here" \
+            --allow-skip "shared gating module needs PyYAML"
           # No --allow-skip here: none of these three suites has a capability skip today,
           # so a skipped case in any of them means the live set did not run.
           python scripts/publish_gate.py functional --xml report-functional.xml \
@@ -198,16 +219,31 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out the tag
+      - name: Check out the pinned commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ needs.preflight.outputs.sha }}
           fetch-depth: 0  # Fetch all history for version detection
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
+      - name: Assert this checkout is the commit the release tests ran
+        env:
+          PINNED_SHA: ${{ needs.preflight.outputs.sha }}
+        run: python scripts/publish_gate.py commit head --expect-sha "$PINNED_SHA"
+
+      - name: Refuse to build if the tag moved
+        env:
+          PINNED_SHA: ${{ needs.preflight.outputs.sha }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          python scripts/publish_gate.py commit pin --repo "$REPO" --tag "$TAG" \
+            --expect-sha "$PINNED_SHA"
 
       - name: Install build dependencies
         run: |
@@ -251,6 +287,37 @@ jobs:
       url: https://pypi.org/p/dbt-maxcompute
 
     steps:
+      # This job installs no toolchain, so the two gate calls use the runner's `python3`;
+      # scripts/publish_gate.py is standard-library only.
+      - name: Check out the pinned commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+          persist-credentials: false
+
+      - name: Assert this checkout carries the gate and is the pinned commit
+        env:
+          PINNED_SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          set -uo pipefail
+          for required in scripts/publish_gate.py tests/maxcompute_gating.py; do
+            if [ ! -f "$required" ]; then
+              echo "::error::$required is absent from $PINNED_SHA: that predates the publish gate"
+              exit 1
+            fi
+          done
+          python3 scripts/publish_gate.py commit head --expect-sha "$PINNED_SHA"
+
+      - name: Refuse to publish if the tag moved
+        env:
+          PINNED_SHA: ${{ needs.preflight.outputs.sha }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          python3 scripts/publish_gate.py commit pin --repo "$REPO" --tag "$TAG" \
+            --expect-sha "$PINNED_SHA"
+
       - uses: actions/download-artifact@v4
         with:
           name: dist
@@ -267,11 +334,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out the tag
+      - name: Check out the pinned commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
-          fetch-depth: 0
+          ref: ${{ needs.preflight.outputs.sha }}
+          fetch-depth: 0  # history for the notes range
+          fetch-tags: true  # previous tags, or `git describe` cannot name one
+
+      - name: Refuse to label the release if the tag moved
+        env:
+          PINNED_SHA: ${{ needs.preflight.outputs.sha }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          python3 scripts/publish_gate.py commit pin --repo "$REPO" --tag "$TAG" \
+            --expect-sha "$PINNED_SHA"
 
       - uses: actions/download-artifact@v4
         with:
@@ -281,23 +359,59 @@ jobs:
       - name: Generate release notes
         id: release_notes
         env:
-          TAG: ${{ inputs.tag }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          PINNED_SHA: ${{ needs.preflight.outputs.sha }}
         run: |
           set -uo pipefail
-          # 用 tag 名加 ^ 取它指向的提交：附注与轻量 tag 都成立（附注 tag 对象本身没有父提交）
-          target="$(git rev-list -n 1 "$TAG^" 2>/dev/null || echo "")"   # 首个 release 时没有父提交，这里取空并按 Initial Release 走
-          PREV_TAG=$(git describe --tags --abbrev=0 "$target" 2>/dev/null || echo "")
+          # The pinned commit, not the tag name: preflight peeled the tag once, every job
+          # checked that commit out, so these notes describe exactly the bytes being released.
+          if [ "$(git cat-file -t "$PINNED_SHA" 2>/dev/null || echo missing)" != "commit" ]; then
+            echo "::error::the pinned value $PINNED_SHA is not a commit in this checkout"
+            exit 1
+          fi
+          if [ -z "$(git tag -l 'v*')" ]; then
+            echo "::error::no v-tags in this checkout: fetch-tags did not deliver them"
+            exit 1
+          fi
+          n_files="$(find dist -maxdepth 1 -type f 2>/dev/null | wc -l)"
+          if [ "$n_files" -lt 2 ]; then
+            echo "::error::dist/ holds $n_files file(s); refusing to open a release with no artifacts"
+            exit 1
+          fi
+          # The parent is used only to locate the previous tag. The range then runs
+          # **through** the pinned commit, so the tagged commit itself is inside the notes;
+          # ending at the parent silently dropped that one commit out of the changelog.
+          PREV_TAG="$(git describe --tags --abbrev=0 "${PINNED_SHA}^" 2>/dev/null || echo "")"
+          if [ -z "$PREV_TAG" ] && git rev-parse --verify -q "${PINNED_SHA}^" >/dev/null; then
+            others="$(git tag -l 'v*' | grep -v -x "$TAG" || true)"
+            if [ -n "$others" ]; then
+              echo "::error::no previous tag found for $PINNED_SHA although other v-tags exist: $(printf '%s\n' "$others" | head -3 | tr '\n' ' ')"
+              exit 1
+            fi
+          fi
           {
             echo "RELEASE_NOTES<<EOF"
+            echo "## Published from"
+            echo ""
+            echo "- tag: \`$TAG\`"
+            echo "- commit: \`$PINNED_SHA\` - checked out, tested and built by this same run"
             if [ -n "$PREV_TAG" ]; then
+              echo ""
               echo "## Changes since $PREV_TAG"
               echo ""
-              git log "$PREV_TAG..$target" --oneline --pretty=format:"- %s (%h)"
+              git log "$PREV_TAG..$PINNED_SHA" --oneline --pretty=format:"- %s (%h)"
             else
+              echo ""
               echo "## Initial Release"
               echo ""
-              git log --oneline --pretty=format:"- %s (%h)" | head -20
+              git log -n 20 "$PINNED_SHA" --oneline --pretty=format:"- %s (%h)"
             fi
+            echo ""
+            echo "### sha256 of the files attached to this release"
+            echo ""
+            echo '```'
+            (cd dist && sha256sum -- *)
+            echo '```'
             echo ""
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
@@ -305,7 +419,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag }}
+          tag_name: ${{ needs.preflight.outputs.tag }}
           name: ${{ needs.preflight.outputs.version }}
           body: ${{ steps.release_notes.outputs.RELEASE_NOTES }}
           files: dist/*
@@ -316,11 +430,16 @@ jobs:
       - name: Report what to verify afterwards
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          PINNED_SHA: ${{ needs.preflight.outputs.sha }}
         run: |
           {
             echo ""
             echo "## verify after this run"
             echo ""
+            echo "- this run published tag \`$TAG\` -> commit \`$PINNED_SHA\`: the test job,"
+            echo "  the build, the PyPI upload and this Release all checked out that commit."
+            echo "- the release body repeats the sha256 of the attached files."
             echo "- PyPI files must be byte-identical to the release assets:"
             echo "  \`curl -s https://pypi.org/pypi/dbt-maxcompute/$VERSION/json\`"
             echo "  and compare each \`digests.sha256\` with the \`digest\` of the same file on the release."

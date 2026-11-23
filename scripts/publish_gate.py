@@ -16,18 +16,25 @@ Command line::
 
     python scripts/publish_gate.py functional --xml dist-results/report-functional.xml \
         --require test_core,test_python_model,test_udf
+    python scripts/publish_gate.py commit pin  --tag v1.12.2 --expect-sha <40-hex>
+    python scripts/publish_gate.py commit head --expect-sha <40-hex>
 
-Exit codes: 0 evidence is sufficient, 1 evidence is insufficient (skips, no passes,
-a required suite produced nothing), 2 the input itself is unusable (missing/unparsable
-report, no testcase at all).
+Exit codes: 0 the evidence is sufficient and the commit binding holds, 1 the evidence is
+insufficient (skips, no passes, a required suite produced nothing) or the tag no longer
+identifies the tested commit, 2 the input itself is unusable (missing/unparsable report,
+no testcase at all, a malformed expectation, git could not be asked).
 """
 
 from __future__ import annotations
 
 import argparse
+import re
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Sequence, Tuple
+
+_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 #: skipped/failed/error markers inside a JUnit ``testcase`` element
 _MARKERS = ("failure", "error", "skipped")
@@ -147,6 +154,140 @@ def evaluate(
     return problems
 
 
+# -------------------------------------------------------------------------------------
+# commit binding: prove that every job in one run used the same commit the tag names
+# -------------------------------------------------------------------------------------
+
+
+def ls_remote(url: str, tag: str) -> Tuple[int, str, str]:
+    """Ask the remote for one tag name, in both shapes a tag name can occupy.
+
+    An annotated tag puts two lines in the listing (the tag object and the commit it
+    peels to), a lightweight tag puts one. Asking for both explicitly is what stops a
+    tag *name* from being mistaken for a commit.
+    """
+    proc = subprocess.run(
+        ["git", "ls-remote", url, "refs/tags/%s" % tag, "refs/tags/%s^{}" % tag],
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def parse_peel(listing: str) -> Tuple[Optional[str], str, List[str]]:
+    """Split an ``ls-remote`` listing into ``(commit, kind, problems)``.
+
+    ``kind`` is ``peeled`` when the commit came from a ``^{}`` line and ``lightweight``
+    when the tag name is the commit itself. Absence and ambiguity come back as problems
+    instead of a guess: guessing here means publishing bytes nothing tested.
+    """
+    direct: List[str] = []
+    peeled: List[str] = []
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not _SHA.match(parts[0]):
+            continue
+        sha, ref = parts
+        if ref.endswith("^{}"):
+            if sha not in peeled:
+                peeled.append(sha)
+        elif sha not in direct:
+            direct.append(sha)
+    if not direct and not peeled:
+        return None, "absent", ["the tag name is not in the remote listing"]
+    if len(peeled) > 1:
+        return None, "ambiguous", ["the peeled ref resolved to %d commits" % len(peeled)]
+    if len(direct) > 1:
+        return None, "ambiguous", ["the tag name resolved to %d commits" % len(direct)]
+    if peeled:
+        return peeled[0], "peeled", []
+    return direct[0], "lightweight", []
+
+
+def check_pin(listing: str, tag: str, expected_sha: str) -> List[str]:
+    """Reasons this tag must not be published as ``expected_sha`` right now."""
+    commit, kind, problems = parse_peel(listing)
+    if problems:
+        return ["cannot bind tag %r to a commit: %s" % (tag, problem) for problem in problems]
+    if commit != expected_sha:
+        return [
+            "tag %r now identifies %s (%s tag), not the tested commit %s"
+            % (tag, commit, kind, expected_sha)
+        ]
+    return []
+
+
+def check_head(actual_head: Optional[str], expected_sha: str) -> List[str]:
+    """Reasons this checkout is not the commit preflight pinned."""
+    if not actual_head:
+        return ["this checkout does not resolve a HEAD commit"]
+    if actual_head != expected_sha:
+        return ["this checkout is at %s, not the pinned commit %s" % (actual_head, expected_sha)]
+    return []
+
+
+def resolve_head(cwd: str) -> Tuple[Optional[str], Optional[str]]:
+    proc = subprocess.run(["git", "-C", cwd, "rev-parse", "HEAD"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip()[:160]
+        return None, "git rev-parse HEAD failed: %s" % detail
+    sha = proc.stdout.strip()
+    if not _SHA.match(sha):
+        return None, "git rev-parse HEAD returned a non-commit value %r" % sha[:60]
+    return sha, None
+
+
+def _validate_expect_sha(value: str) -> Optional[str]:
+    """An empty expectation is the failure mode of an unresolved job output, not a pass."""
+    if not value:
+        return "--expect-sha is empty; the upstream pin did not produce a commit"
+    if not _SHA.match(value):
+        return "--expect-sha %r is not a full 40-hex commit id" % value[:60]
+    return None
+
+
+def command_commit(args: argparse.Namespace) -> int:
+    expected = args.expect_sha
+    bad = _validate_expect_sha(expected)
+    if bad:
+        print("::error::publish gate refused: %s" % bad, file=sys.stderr)
+        return 2
+    if args.what == "pin":
+        url = args.url or ("https://github.com/%s" % args.repo if args.repo else "")
+        if not url:
+            print(
+                "::error::publish gate refused: need --repo owner/name or --url", file=sys.stderr
+            )
+            return 2
+        rc, listing, err = ls_remote(url, args.tag)
+        if rc != 0:
+            detail = err.strip()[:160]
+            print(
+                "::error::publish gate refused: cannot ask the remote about tag %r: %s"
+                % (args.tag, detail),
+                file=sys.stderr,
+            )
+            return 2
+        problems = check_pin(listing, args.tag, expected)
+        if problems:
+            for problem in problems:
+                print("::error::publish gate refused: %s" % problem, file=sys.stderr)
+            return 1
+        print("tag %s still identifies %s: binding holds" % (args.tag, expected))
+        return 0
+    head, err = (args.head, None) if args.head else resolve_head(args.cwd)
+    if err:
+        print("::error::publish gate refused: %s" % err, file=sys.stderr)
+        return 2
+    problems = check_head(head, expected)
+    if problems:
+        for problem in problems:
+            print("::error::publish gate refused: %s" % problem, file=sys.stderr)
+        return 1
+    print("checkout is at the pinned commit %s: binding holds" % expected)
+    return 0
+
+
 def _label(case: Dict[str, str]) -> str:
     return "%s::%s" % (case["classname"] or case["file"] or "?", case["name"])
 
@@ -196,7 +337,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     fun.add_argument(
         "--min-passed", type=int, default=1, help="minimum passing cases overall (default 1)"
     )
+    commit = sub.add_parser("commit", help="prove a job uses the commit the tag names")
+    commit.add_argument(
+        "what", choices=["pin", "head"], help="pin: tag -> commit, head: checkout -> commit"
+    )
+    commit.add_argument("--tag", help="tag name used as the release label (pin)")
+    commit.add_argument("--repo", help="owner/name, used to build the https remote (pin)")
+    commit.add_argument("--url", help="explicit remote url, overrides --repo (pin)")
+    commit.add_argument(
+        "--expect-sha", required=True, dest="expect_sha", help="the pinned commit id"
+    )
+    commit.add_argument("--cwd", default=".", help="checkout to read HEAD from (head)")
+    commit.add_argument("--head", help="pre-read HEAD value; tests only (head)")
     args = parser.parse_args(argv)
+
+    if args.command == "commit":
+        return command_commit(args)
 
     required = [t.strip() for t in args.require.split(",") if t.strip()]
     try:
