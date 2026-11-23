@@ -9,14 +9,18 @@ column that silently selected zero rows in every batch:
 * what this adapter does about a DATE event column now. MaxCompute evaluates
   `DATE >= '2025-05-01 00:00:00+00:00'` as NULL rather than raising, so every batch selected zero
   rows and `dbt run` still reported `PASS` with the target empty (measured: `PASS=2`, 0 rows, in
-  `Etc/GMT`, `Asia/Shanghai` and `Etc/GMT+8` alike). `mc_validate_microbatch_config` now refuses the
-  declared combination instead of letting it look like a successful run.
+  `Etc/GMT`, `Asia/Shanghai` and `Etc/GMT+8` alike). The refusal now lives in the adapter's filter
+  path, where the warehouse can be asked what the column being filtered *is*: a verified physical
+  `DATE` stops the batch on any session. `mc_validate_microbatch_config` keeps its declaration-level
+  check only as an informational note - it cannot stop a model, and it must not be able to escalate
+  into stopping one (`TestMicrobatchDeclarationSurvivesWarnError`).
 """
 
 import json
 import os
 
 import pytest
+import yaml
 from dbt.tests.util import run_dbt, run_dbt_and_capture
 
 # A DATE has no clock, so these literals read the same day in every session timezone; the
@@ -39,7 +43,7 @@ _staged_sql = (
     "select id, cast(event_date as timestamp) as event_time from {{ ref('input_model') }}\n"
 )
 
-_REASON = "warns: this model declares a `date` event partition column"
+_REASON = "notes (informational, this does not stop the model)"
 # The authority is the physical type, asked in the adapter's filter path; its refusal says so.
 _PHYSICAL_REFUSAL = "cannot window a microbatch model on the `date` column"
 
@@ -188,7 +192,7 @@ class TestMicrobatchDeclaredDateOverAnInstantUpstream(_WindowedScenario):
     `timestamp` (the remedy from the class above), the model still declares its partition field as
     `date`, and the event field and partition field share a name - the exact condition the
     compile-time check used to refuse. Physical type is the authority, so the batches have to select
-    their rows, and the declaration is expected to show up as a warning rather than an error.
+    their rows, and the declaration is expected to read as a note rather than as a stop.
     """
 
     # The window attaches to the relation this model reads, so the upstream has to be the staged
@@ -206,15 +210,159 @@ class TestMicrobatchDeclaredDateOverAnInstantUpstream(_WindowedScenario):
             "microbatch_model.sql": self.model_sql,
         }
 
-    def test_the_declaration_warns_and_the_rows_still_land(self, project):
+    def test_the_declaration_logs_and_the_rows_still_land(self, project):
         # _window returns dbt's results, not a (output, result) pair - capturing here is the point,
-        # because the assertion is about what the console shows: a warning line and no error.
+        # because the assertion is about what the console shows: the note, and no error.
         _, output = run_dbt_and_capture(
             self._args("--event-time-start", DAY1[0], "--event-time-end", DAY1[1])
         )
         assert _REASON in output, f"expected the diagnostic in:\n{output}"
         assert self._ids(project) == [1, 2], "a physically instant column is windowed fine"
         assert "ERROR=0" in output, output[-400:]
+
+
+class TestMicrobatchDeclarationSurvivesWarnError(_WindowedScenario):
+    """The note has to survive `--warn-error` (review 2026-11-22).
+
+    Same shape as the class above - physically instant upstream, `date` declared downstream, one
+    field name - plus the flags dbt uses to escalate warnings. The macro used to call
+    `exceptions.warn`, and dbt promotes that `JinjaLogWarning` to an error under either flag, which
+    would have handed the declaration back the power to stop a model whose column is an instant.
+
+    Each cell asserts the rows *this* run added. A failed run leaves the target as it was, so
+    re-asserting an earlier window's rows would be green either way and prove nothing.
+    """
+
+    upstream = "staged_model"
+    model_sql = _microbatch_model("event_time", "date", "id, event_time", upstream="staged_model")
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "input_model.sql": _input_sql,
+            "staged_model.sql": _staged_sql,
+            "microbatch_model.sql": self.model_sql,
+        }
+
+    def test_warn_error_still_lands_the_first_window(self, project):
+        _, output = run_dbt_and_capture(
+            self._args("--event-time-start", DAY1[0], "--event-time-end", DAY1[1], "--warn-error")
+        )
+        assert _REASON in output, f"expected the note in:\n{output}"
+        assert self._ids(project) == [1, 2], "--warn-error must not turn the note into a stop"
+        assert "ERROR=0" in output, output[-400:]
+
+    def test_escalating_jinjalogwarning_still_lands_the_next_window(self, project):
+        # The narrow form of the same escalation: only JinjaLogWarning becomes an error, so this
+        # cell cannot go green because some unrelated warning happened to be absent.
+        _, output = run_dbt_and_capture(
+            self._args(
+                "--event-time-start",
+                DAY2[0],
+                "--event-time-end",
+                DAY2[1],
+                "--warn-error-options",
+                '{"include": ["JinjaLogWarning"]}',
+            )
+        )
+        assert self._ids(project) == [1, 2, 3, 4], (
+            "the second window has to add its own two rows; fewer means the escalated note "
+            "stopped the batch"
+        )
+        assert "ERROR=0" in output, output[-400:]
+
+
+class TestMicrobatchPhysicalDateSourceOnShiftedSession(_WindowedScenario):
+    """A physical `date` behind a `source()`, shifted session, event and partition named apart.
+
+    The review asked for this cell by name: the DATE cells that existed use `ref()` on the default
+    profile, and the inherited `source()` cell covers TIMESTAMP against TIMESTAMP_NTZ. Nothing
+    pinned the combination the physical-type authority is supposed to hold - a relation dbt did not
+    build, a session clock that would move the window, and an event field whose name differs from
+    the partition field's. That last part is the point: no declaration-level check can fire on that
+    shape, so only the warehouse answer can stop it.
+    """
+
+    profile_timezone = "Asia/Shanghai"
+
+    @pytest.fixture(scope="class")
+    def dbt_profile_target(self):
+        """The shared profile with `timezone` set, restored afterwards.
+
+        Same reason as in `test_microbatch_partition_timezone.py`: pyodps keeps `local_timezone` in a
+        module global, and leaving a shift behind would run the next class on this class's clock.
+        """
+        from odps import options
+
+        filepath = os.environ.get("DBT_PROFILE_PATH")
+        if not filepath:
+            pytest.skip("needs a real MaxCompute profile via DBT_PROFILE_PATH")
+        saved = options.local_timezone
+        with open(filepath) as handle:
+            target = yaml.safe_load(handle)
+        target["timezone"] = self.profile_timezone
+        try:
+            yield target
+        finally:
+            options.local_timezone = saved
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        model = (
+            "{{ config(\n"
+            "    materialized='incremental',\n"
+            "    incremental_strategy='microbatch',\n"
+            "    unique_key='id',\n"
+            "    event_time='event_date',\n"
+            "    batch_size='day',\n"
+            "    begin=modules.datetime.datetime(2025, 5, 1, 0, 0, 0),\n"
+            "    partition_by={'field': 'event_day', 'data_type': 'timestamp', "
+            "'granularity': 'day'}\n"
+            ") }}\n"
+            "select id, event_date as event_day from {{ source('etl', 'src_date_events') }}\n"
+        )
+        source = {
+            "name": "etl",
+            "schema": "{{ target.schema }}",
+            "tables": [
+                {
+                    "name": "src_date_events",
+                    "identifier": "input_model",
+                    "config": {"event_time": "event_date"},
+                }
+            ],
+        }
+        return {
+            "input_model.sql": _input_sql,
+            "microbatch_model.sql": model,
+            "sources.yml": yaml.safe_dump({"version": 2, "sources": [source]}),
+        }
+
+    def test_the_source_date_column_is_refused_and_writes_nothing(self, project):
+        # Build the table first: a source is not a dependency edge, so without this step dbt decides
+        # whether the describe happens before or after the relation exists.
+        run_dbt(["run", "--select", "input_model"])
+        # Only the microbatch model in this run: a source is not a dependency edge, so selecting the
+        # table as well would let dbt choose whether the describe happens before or after it.
+        _, output = run_dbt_and_capture(
+            [
+                "run",
+                "--event-time-start",
+                DAY1[0],
+                "--event-time-end",
+                DAY1[1],
+                "--select",
+                "microbatch_model",
+            ],
+            expect_pass=None,
+        )
+        assert _PHYSICAL_REFUSAL in output, (
+            "a physical DATE behind a source() has to be refused on a shifted session too:\n"
+            f"{output[-800:]}"
+        )
+        assert not self._target_exists(
+            project
+        ), "and the refusal has to come before anything is written, not after an empty overwrite"
 
 
 class TestMicrobatchPrePopulatedTargetSurvivesARefusal(_WindowedScenario):
