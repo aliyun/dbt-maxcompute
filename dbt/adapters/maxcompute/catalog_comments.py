@@ -146,6 +146,11 @@ def persist_table_comments(
         catalog = getattr(odps, "catalog_rest", None)
         if catalog is None:
             return False
+        with_retry_enabled = getattr(catalog, "with_retry_enabled", None)
+        if not callable(with_retry_enabled):
+            return False
+        # Check the result of an uncertain write before any replay.
+        writer = with_retry_enabled(False)
         url = (
             f"{catalog.endpoint.rstrip('/')}{_CATALOG_PATH}"
             f"/projects/{quote(project, safe='')}/schemas/{quote(relation.schema or 'default', safe='')}"
@@ -167,7 +172,7 @@ def persist_table_comments(
             return True
 
         try:
-            updated = catalog.put(
+            updated = writer.put(
                 url,
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                 headers={"Content-Type": "application/json"},

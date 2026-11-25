@@ -44,7 +44,7 @@
           alter_column_comment, adapter.dispatch('alter_column_comment', 'dbt')
       ))
       and adapter.persist_table_comments_via_catalog(relation, table_description, column_docs) %}
-    {% do return(none) %}
+    {% do return('') %}
   {% endif %}
 
   {% if table_description is not none %}

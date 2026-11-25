@@ -420,7 +420,7 @@ def catalog_persist_context(*, result, custom_columns=False, sql_header=None):
 def test_default_persist_docs_combines_enabled_comments(for_relation, for_columns):
     macros = catalog_persist_context(result=True)
 
-    macros.maxcompute__persist_docs(TABLE, VIEW_DOCS, for_relation, for_columns)
+    assert macros.maxcompute__persist_docs(TABLE, VIEW_DOCS, for_relation, for_columns) == ""
 
     macros.adapter.persist_table_comments_via_catalog.assert_called_once_with(
         TABLE,
