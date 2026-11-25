@@ -392,3 +392,65 @@ def test_matching_view_comment_does_not_replace_the_view():
 
     assert not macros.maxcompute__alter_relation_comment(VIEW, description).strip()
     assert not adapter.view_comment_matches(VIEW, r"""Customer's "list"\nC:\temp\\""")
+
+
+def catalog_persist_context(*, result, custom_columns=False, sql_header=None):
+    adapter = adapter_for_docs()
+    adapter.persist_table_comments_via_catalog = MacroMock(return_value=result)
+    relation_sql = MacroMock(return_value="legacy relation comment")
+    relation_sql.macro = SimpleNamespace(package_name="dbt")
+    column_sql = MacroMock(return_value="")
+    column_sql.macro = SimpleNamespace(package_name="custom_project" if custom_columns else "dbt")
+    macros = render_macros(
+        PERSIST_DOCS,
+        adapter=adapter,
+        config=model_config("table", relation=True, sql_header=sql_header),
+        model=VIEW_DOCS,
+        alter_relation_comment=relation_sql,
+        alter_column_comment=column_sql,
+        run_query=MacroMock(),
+    )
+    return macros
+
+
+@pytest.mark.parametrize(
+    ("for_relation", "for_columns"),
+    [(True, True), (True, False), (False, True)],
+)
+def test_default_persist_docs_combines_enabled_comments(for_relation, for_columns):
+    macros = catalog_persist_context(result=True)
+
+    macros.maxcompute__persist_docs(TABLE, VIEW_DOCS, for_relation, for_columns)
+
+    macros.adapter.persist_table_comments_via_catalog.assert_called_once_with(
+        TABLE,
+        VIEW_DOCS["description"] if for_relation else None,
+        VIEW_DOCS["columns"] if for_columns else {},
+    )
+    macros.alter_relation_comment.assert_not_called()
+    macros.alter_column_comment.assert_not_called()
+    macros.run_query.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("relation", "custom_columns", "sql_header", "catalog_attempted"),
+    [
+        (TABLE, False, None, True),
+        (VIEW, False, None, False),
+        (TABLE, True, None, False),
+        (TABLE, False, "set odps.test=true;", False),
+    ],
+)
+def test_persist_docs_keeps_the_existing_fallback(
+    relation, custom_columns, sql_header, catalog_attempted
+):
+    macros = catalog_persist_context(
+        result=False, custom_columns=custom_columns, sql_header=sql_header
+    )
+
+    macros.maxcompute__persist_docs(relation, VIEW_DOCS, True, True)
+
+    assert macros.adapter.persist_table_comments_via_catalog.called == catalog_attempted
+    macros.alter_relation_comment.assert_called_once_with(relation, VIEW_DOCS["description"])
+    macros.alter_column_comment.assert_called_once_with(relation, VIEW_DOCS["columns"])
+    macros.run_query.assert_called_once_with("legacy relation comment")

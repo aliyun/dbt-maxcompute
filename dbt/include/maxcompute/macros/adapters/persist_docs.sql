@@ -29,15 +29,33 @@
 {%- endmacro %}
 
 {% macro maxcompute__persist_docs(relation, model, for_relation, for_columns) -%}
-  {% if for_relation and config.persist_relation_docs() and model.description %}
-    {% set relation_comment_sql = alter_relation_comment(relation, model.description) | trim %}
+  {% set table_description = model.description if for_relation and config.persist_relation_docs()
+      and model.description else none %}
+  {% set column_docs = model.columns if for_columns and config.persist_column_docs() and model.columns else {} %}
+
+  {% if relation.is_table and (table_description is not none or column_docs)
+      and maxcompute__uses_default_docs_macro(persist_docs, adapter.dispatch('persist_docs', 'dbt'))
+      and (table_description is none or
+           (not config.get('sql_header') and not config.get('sql_hints')
+            and maxcompute__uses_default_docs_macro(
+                alter_relation_comment, adapter.dispatch('alter_relation_comment', 'dbt')
+            )))
+      and (not column_docs or maxcompute__uses_default_docs_macro(
+          alter_column_comment, adapter.dispatch('alter_column_comment', 'dbt')
+      ))
+      and adapter.persist_table_comments_via_catalog(relation, table_description, column_docs) %}
+    {% do return(none) %}
+  {% endif %}
+
+  {% if table_description is not none %}
+    {% set relation_comment_sql = alter_relation_comment(relation, table_description) | trim %}
     {% if relation_comment_sql %}
       {% do run_query(relation_comment_sql) %}
     {% endif %}
   {% endif %}
 
-  {% if for_columns and config.persist_column_docs() and model.columns %}
-    {{ alter_column_comment(relation, model.columns) }}
+  {% if column_docs %}
+    {{ alter_column_comment(relation, column_docs) }}
   {% endif %}
 {% endmacro %}
 
