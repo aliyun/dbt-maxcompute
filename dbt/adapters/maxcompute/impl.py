@@ -33,6 +33,7 @@ from odps.types import Char, validate_value
 from odps.utils import escape_odps_string
 
 from dbt.adapters.maxcompute import MaxComputeConnectionManager
+from dbt.adapters.maxcompute.catalog_comments import persist_table_comments
 from dbt.adapters.maxcompute.column import (
     CHAR_MAX_SIZE,
     VARCHAR_MAX_SIZE,
@@ -1258,6 +1259,22 @@ class MaxComputeAdapter(SQLAdapter):
         view = self.get_odps_table_by_relation(relation)
         # GetTable escapes view-level comments, leaving apostrophes unescaped.
         return view is not None and view.comment == escape_odps_string(comment).replace(r"\'", "'")
+
+    @available.parse(lambda *a, **k: False)
+    def persist_table_comments_via_catalog(
+        self,
+        relation: MaxComputeRelation,
+        description: Optional[str],
+        column_dict: Dict[str, Dict[str, Any]],
+    ) -> bool:
+        project = relation.database
+        try:
+            if not project or self.is_external_catalog_project(project):
+                return False
+        except (ODPSError, OSError, ValueError):
+            logger.debug("Could not classify the target catalog before comment update. Using SQL.")
+            return False
+        return persist_table_comments(self.get_odps_client(), relation, description, column_dict)
 
     @available
     def add_comment(self, relation: MaxComputeRelation, comment: str) -> str:
