@@ -1,11 +1,11 @@
 # 在 DLF Paimon 外部项目中试用 dbt
 
-dbt-maxcompute `1.12.2b1` 支持从 MaxCompute 的 DLF Paimon 外部项目（EP v2）读取 `source()`，并试用 SQL `table` 和 `incremental` 模型。写入目标取决于模型所在的项目和 Schema。请先创建并配置外部项目，并为运行账号授予所需的数据权限。[Paimon_DLF 外部项目](https://help.aliyun.com/zh/maxcompute/paimon-dlf-external-project)
+dbt-maxcompute `1.12.2b2` 支持从 MaxCompute 的 DLF Paimon 外部项目（EP v2）读取 `source()`，并试用 SQL `table` 和 `incremental` 模型。写入目标取决于模型所在的项目和 Schema。请先创建并配置外部项目，并为运行账号授予所需的数据权限。[Paimon_DLF 外部项目](https://help.aliyun.com/zh/maxcompute/paimon-dlf-external-project)
 
 ## 安装试用版
 
 ```bash
-python -m pip install 'dbt-maxcompute==1.12.2b1'
+python -m pip install 'dbt-maxcompute==1.12.2b2'
 ```
 
 ## 物化方式
