@@ -999,6 +999,32 @@ class MaxComputeAdapter(SQLAdapter):
         ]
         return columns
 
+    @available.parse(lambda *a, **k: [])
+    def get_view_column_definitions_for_docs(
+        self, sql: str, column_dict: Dict[str, Dict[str, Any]]
+    ) -> List[str]:
+        """Probe and render view columns for optional inline documentation."""
+        try:
+            columns = self.get_column_schema_from_query(sql)
+        except (DbtRuntimeError, ODPSError, OSError):
+            logger.debug("Could not inspect view columns. Using post-create comments.")
+            return []
+
+        if len(columns) == 1 and columns[0].name == "_c0" and columns[0].dtype.lower() == "string":
+            # PyODPS uses this placeholder when the result has no column schema.
+            return []
+
+        definitions = []
+        has_comment = False
+        for column in columns:
+            definition = quote_ref(column.name)
+            comment = column_dict.get(column.name, {}).get("description")
+            if comment:
+                definition += f" COMMENT {self.quote_string_literal(comment)}"
+                has_comment = True
+            definitions.append(definition)
+        return definitions if has_comment else []
+
     def timestamp_add_sql(self, add_to: str, number: int = 1, interval: str = "hour") -> str:
         return f"dateadd({add_to}, {number}, '{interval}')"
 
@@ -1153,7 +1179,10 @@ class MaxComputeAdapter(SQLAdapter):
     @available
     @classmethod
     def mc_render_raw_columns_constraints(
-        cls, raw_columns: Dict[str, Dict[str, Any]], partition_config: Optional[PartitionConfig]
+        cls,
+        raw_columns: Dict[str, Dict[str, Any]],
+        partition_config: Optional[PartitionConfig],
+        persist_column_docs: bool = False,
     ) -> List:
         rendered_column_constraints = []
         partition_column = []
@@ -1170,6 +1199,10 @@ class MaxComputeAdapter(SQLAdapter):
                 c = cls.process_parsed_constraint(constraint, cls.render_column_constraint)
                 if c is not None:
                     rendered_column_constraint.append(c)
+            if persist_column_docs and v.get("description"):
+                rendered_column_constraint.append(
+                    f"COMMENT {cls.quote_string_literal(v['description'])}"
+                )
             rendered_column_constraints.append(" ".join(rendered_column_constraint))
 
         return rendered_column_constraints
@@ -1216,6 +1249,17 @@ class MaxComputeAdapter(SQLAdapter):
         logger.debug(f"Run raw sql: {sql}, instanceId: {inst.id}")
 
     @available
+    @staticmethod
+    def quote_string_literal(value: str) -> str:
+        return "'" + escape_odps_string(value) + "'"
+
+    @available
+    def view_comment_matches(self, relation: MaxComputeRelation, comment: str) -> bool:
+        view = self.get_odps_table_by_relation(relation)
+        # GetTable escapes view-level comments, leaving apostrophes unescaped.
+        return view is not None and view.comment == escape_odps_string(comment).replace(r"\'", "'")
+
+    @available
     def add_comment(self, relation: MaxComputeRelation, comment: str) -> str:
         """
         Add comment to a relation.
@@ -1236,19 +1280,13 @@ class MaxComputeAdapter(SQLAdapter):
     def add_comment_to_column(
         self, relation: MaxComputeRelation, column_name: str, comment: str
     ) -> str:
-        """
-        Add comment to column.
-        """
+        """Add a comment to an existing column."""
         table = self.get_odps_table_by_relation(relation)
         if table is not None:
             for column in table.table_schema.columns:
                 if column.name == column_name and column.comment != comment:
-                    if relation.is_table:
-                        sql = f"ALTER TABLE {relation.database}.{relation.schema}.{relation.identifier} CHANGE COLUMN {quote_ref(column_name)} COMMENT {quote_string(comment)};"
-                        self.run_raw_sql(sql, None)
-                    if relation.is_view:
-                        sql = f"ALTER VIEW {relation.database}.{relation.schema}.{relation.identifier} CHANGE COLUMN {quote_ref(column_name)} COMMENT {quote_string(comment)};"
-                        self.run_raw_sql(sql, None)
+                    if relation.is_table or relation.is_view:
+                        self._change_column_comment(relation, column_name, quote_string(comment))
                     if relation.is_materialized_view:
                         raise DbtRuntimeError("Unsupported set comment to materialized view. ")
                 else:
@@ -1256,6 +1294,32 @@ class MaxComputeAdapter(SQLAdapter):
                         f"The comments for column {column_name} do not need to be modified because the same comments already exist."
                     )
         return ""
+
+    @available
+    def add_comments_to_columns(
+        self, relation: MaxComputeRelation, column_dict: Dict[str, Dict[str, Any]]
+    ) -> None:
+        """Reconcile native table or view comments from one metadata read."""
+        current_comments = {
+            column.name: column.comment for column in self.get_columns_in_relation(relation)
+        }
+        for column_name, docs in column_dict.items():
+            comment = docs.get("description") or ""
+            if (
+                column_name in current_comments
+                and (current_comments[column_name] or "") != comment
+            ):
+                self._change_column_comment(
+                    relation, column_name, self.quote_string_literal(comment)
+                )
+
+    def _change_column_comment(
+        self, relation: MaxComputeRelation, column_name: str, comment_literal: str
+    ) -> None:
+        relation_type = "TABLE" if relation.is_table else "VIEW"
+        relation_name = f"{relation.database}.{relation.schema}.{relation.identifier}"
+        sql = f"ALTER {relation_type} {relation_name} CHANGE COLUMN {quote_ref(column_name)} COMMENT {comment_literal};"
+        self.run_raw_sql(sql, None)
 
     @available
     def get_relations_by_pattern(
