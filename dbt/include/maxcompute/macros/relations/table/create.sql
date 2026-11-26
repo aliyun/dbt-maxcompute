@@ -203,7 +203,13 @@ _dbt_maxframe_execute(_dbt_maxframe_sink)
         {% set contract_config = config.get('contract') %}
         {% if contract_config.enforced and (not temporary) %}
             {{ get_assert_columns_equivalent(sql) }}
-            {{ get_table_columns_and_constraints_without_brackets(partition_config) }}
+            {% if get_table_columns_and_constraints_without_brackets.macro is defined
+                  and get_table_columns_and_constraints_without_brackets.macro.package_name == 'dbt_maxcompute'
+                  and maxcompute__should_inline_column_docs('table', relation.database) %}
+                {{ get_table_columns_and_constraints_without_brackets(partition_config, persist_column_docs=true) }}
+            {% else %}
+                {{ get_table_columns_and_constraints_without_brackets(partition_config) }}
+            {% endif %}
         {%- else -%}
             {{ get_table_columns(sql, primary_keys, partition_config, sql_header) }}
         {%- endif -%}
@@ -274,9 +280,13 @@ _dbt_maxframe_execute(_dbt_maxframe_sink)
 {% endmacro %}
 
 -- Compared to get_table_columns_and_constraints, only the surrounding brackets are deleted
-{% macro get_table_columns_and_constraints_without_brackets(partition_config=None) -%}
+{% macro get_table_columns_and_constraints_without_brackets(partition_config=None, persist_column_docs=false) -%}
     {# loop through user_provided_columns to create DDL with data types and constraints #}
-    {%- set raw_column_constraints = adapter.mc_render_raw_columns_constraints(raw_columns=model['columns'], partition_config=partition_config) -%}
+    {%- set raw_column_constraints = adapter.mc_render_raw_columns_constraints(
+        raw_columns=model['columns'],
+        partition_config=partition_config,
+        persist_column_docs=persist_column_docs
+    ) -%}
     {%- set raw_model_constraints = adapter.render_raw_model_constraints(raw_constraints=model['constraints']) -%}
     {% for c in raw_column_constraints -%}
       {{ c }}{{ "," if not loop.last or raw_model_constraints }}
