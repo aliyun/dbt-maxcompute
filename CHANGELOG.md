@@ -12,6 +12,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Microbatch models on a profile that pins a non-UTC `timezone` no longer lose
+  rows between adjacent batches. MaxCompute parses a timestamp string on the
+  session timezone while the batch's partitions come from `trunc_time()`, which
+  cuts UTC, so a `timezone: Asia/Shanghai` profile shifted every window eight
+  hours into its neighbour's partition and the later `insert overwrite` erased
+  rows the earlier batch had written - with the run reporting success. The
+  boundary is now stated as the session's own reading of the same instant, so
+  the window and the partition key are cut by one clock - for the event columns
+  that have a clock at all. The rest of the rule, and the two behaviour changes
+  it carries:
+  * a `timestamp_ntz` event column is compared as written, so its window stays
+    on the UTC reading; shifting it would move rows into the neighbouring
+    batch and give such a model the very failure this fixes (measured end to
+    end before narrowing the rule);
+  * the type used is the column's **physical** type on the relation being read,
+    not the type a YAML property declares - measured both ways, a declaration
+    that disagrees with the column picks the wrong clock in both directions. The declaration is
+    never consulted for the clock: when the warehouse cannot be asked there is no second authority
+    to fall back on, so the batch is refused rather than guessed, and what a declaration buys is an
+    informational note on the console - logged, not warned, because dbt escalates a JinjaLogWarning
+    to an error under `--warn-error` and that would put the YAML back in charge of the run;
+  * on a non-UTC session, a batch whose window cannot be stated on a verifiable
+    type now fails instead of guessing, as does a batch whose two boundaries
+    collapse to the same wall clock inside a daylight-saving fold - both used to
+    select no rows and report success. `date` event columns fall in the first
+    group: still a separate limitation, but no longer a silent one.
+  Where this cannot state the session clock at all (nothing pinned, a value that
+  is not a zone name, or a name the host cannot resolve) the window is left
+  exactly as dbt-core rendered it.
+
+- Microbatch **SQL** models whose event column is physically a `date` are now refused when the batch
+  predicate is built, instead of running empty; the decision asks the warehouse for the type of the
+  relation being filtered, so a `date` *declaration* over an instant upstream only leaves a note and
+  still writes its rows - under `--warn-error` too, and MaxFrame Python models are left alone because they bind their window in
+  Python rather than comparing a boundary text to the column. dbt-core compares each batch against a timestamp-shaped
+  boundary (`event_time >= '2025-05-01 00:00:00'` since #40, with an offset before it), and
+  MaxCompute evaluates a `DATE` against either text as `NULL` rather than raising: every batch
+  selected zero rows, the `insert overwrite` of an empty query changed nothing, and `dbt run`
+  reported the model as a success with the target left empty. Measured on a real project - four
+  source rows across two days, `PASS=2`, zero rows - in `Etc/GMT`, `Asia/Shanghai` and `Etc/GMT+8`
+  sessions alike, so no session clock can line the two up. Rendering a date-only boundary would fix
+  that comparison but cannot be rendered blindly: the point inside dbt-core is handed a field name,
+  not a column type, and the date-only text is measured to be refused outright by a `datetime`
+  column and to evaluate to `NULL` for `timestamp` and `timestamp_ntz`, i.e. it would empty or break
+  the models that work today. The adapter's own filter path is one level up and can describe the
+  relation, which is why the refusal lives there. The error names the replacement, measured end to
+  end, together with the fact that a refused batch leaves an already-populated target and its
+  partitions untouched: expose
+  the event column as an instant *in the relation the window is applied to* (a `cast()` inside the
+  microbatch model's own SELECT is too late) and partition on it as `timestamp`.
+  See `docs/microbatch-support.md`.
+
 ## [1.12.2b2] — 2026-11-25 (preview)
 
 ### Changed
@@ -157,57 +211,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than rounded: a `datetime` column rejects fractional seconds too, so a
   `--sample` window against one still fails to compile instead of silently
   changing the window. See `docs/microbatch-support.md`.
-- Microbatch models on a profile that pins a non-UTC `timezone` no longer lose
-  rows between adjacent batches. MaxCompute parses a timestamp string on the
-  session timezone while the batch's partitions come from `trunc_time()`, which
-  cuts UTC, so a `timezone: Asia/Shanghai` profile shifted every window eight
-  hours into its neighbour's partition and the later `insert overwrite` erased
-  rows the earlier batch had written - with the run reporting success. The
-  boundary is now stated as the session's own reading of the same instant, so
-  the window and the partition key are cut by one clock - for the event columns
-  that have a clock at all. The rest of the rule, and the two behaviour changes
-  it carries:
-  * a `timestamp_ntz` event column is compared as written, so its window stays
-    on the UTC reading; shifting it would move rows into the neighbouring
-    batch and give such a model the very failure this fixes (measured end to
-    end before narrowing the rule);
-  * the type used is the column's **physical** type on the relation being read,
-    not the type a YAML property declares - measured both ways, a declaration
-    that disagrees with the column picks the wrong clock in both directions. The declaration is
-    never consulted for the clock: when the warehouse cannot be asked there is no second authority
-    to fall back on, so the batch is refused rather than guessed, and what a declaration buys is an
-    informational note on the console - logged, not warned, because dbt escalates a JinjaLogWarning
-    to an error under `--warn-error` and that would put the YAML back in charge of the run;
-  * on a non-UTC session, a batch whose window cannot be stated on a verifiable
-    type now fails instead of guessing, as does a batch whose two boundaries
-    collapse to the same wall clock inside a daylight-saving fold - both used to
-    select no rows and report success. `date` event columns fall in the first
-    group: still a separate limitation, but no longer a silent one.
-  Where this cannot state the session clock at all (nothing pinned, a value that
-  is not a zone name, or a name the host cannot resolve) the window is left
-  exactly as dbt-core rendered it.
-
-- Microbatch **SQL** models whose event column is physically a `date` are now refused when the batch
-  predicate is built, instead of running empty; the decision asks the warehouse for the type of the
-  relation being filtered, so a `date` *declaration* over an instant upstream only leaves a note and
-  still writes its rows - under `--warn-error` too, and MaxFrame Python models are left alone because they bind their window in
-  Python rather than comparing a boundary text to the column. dbt-core compares each batch against a timestamp-shaped
-  boundary (`event_time >= '2025-05-01 00:00:00'` since #40, with an offset before it), and
-  MaxCompute evaluates a `DATE` against either text as `NULL` rather than raising: every batch
-  selected zero rows, the `insert overwrite` of an empty query changed nothing, and `dbt run`
-  reported the model as a success with the target left empty. Measured on a real project - four
-  source rows across two days, `PASS=2`, zero rows - in `Etc/GMT`, `Asia/Shanghai` and `Etc/GMT+8`
-  sessions alike, so no session clock can line the two up. Rendering a date-only boundary would fix
-  that comparison but cannot be rendered blindly: the point inside dbt-core is handed a field name,
-  not a column type, and the date-only text is measured to be refused outright by a `datetime`
-  column and to evaluate to `NULL` for `timestamp` and `timestamp_ntz`, i.e. it would empty or break
-  the models that work today. The adapter's own filter path is one level up and can describe the
-  relation, which is why the refusal lives there. The error names the replacement, measured end to
-  end, together with the fact that a refused batch leaves an already-populated target and its
-  partitions untouched: expose
-  the event column as an instant *in the relation the window is applied to* (a `cast()` inside the
-  microbatch model's own SELECT is too late) and partition on it as `timestamp`.
-  See `docs/microbatch-support.md`.
 
 ## [1.11.3b3] — 2026-08-26
 
