@@ -3,8 +3,10 @@
 dbt-core renders a microbatch window from a UTC ``datetime``, so the text it produces carries an
 offset: ``event_time >= '2025-05-01 00:00:00+00:00'``. MaxCompute refuses that shape for a
 ``datetime`` column - ``ODPS-0121095`` while generating the physical plan - which is why the same
-model runs on ``timestamp`` and fails outright on ``datetime``. The adapter drops the suffix, and
-only where the session clock is UTC so that the instant the window denotes does not move.
+model runs on ``timestamp`` and fails outright on ``datetime``. The adapter states the boundary as the session clock's own reading of that instant, which drops
+the suffix everywhere and moves the window only where the session is not on UTC - the shift being
+the subject of ``test_microbatch_session_clock.py``. Where this cannot state the session clock at
+all, dbt-core's rendering is returned untouched.
 
 Everything asserted here is pure rendering, so it runs on a machine with no MaxCompute
 credentials. The server readings behind it - three column types x both text shapes x three
@@ -13,13 +15,16 @@ session clocks, and the model end to end - are in
 in ``docs/microbatch-support.md``.
 """
 
+from contextlib import contextmanager
 from datetime import datetime
+from unittest import mock
 
 import pytest
 import pytz
 from dbt.adapters.base.relation import EventTimeFilter
 from odps import options
 
+from dbt.adapters.maxcompute import relation as relation_module
 from dbt.adapters.maxcompute.relation import MaxComputeRelation
 
 UTC_DAY_START = datetime(2025, 5, 1, 0, 0, 0, tzinfo=pytz.UTC)
@@ -35,11 +40,26 @@ def session_clock():
     options.local_timezone = saved
 
 
-def _render(start=UTC_DAY_START, end=UTC_DAY_END, field="event_time"):
+@contextmanager
+def _warehouse_types(types):
+    """Pin the type answer so this file can stay about the *text*, not the lookup.
+
+    Most cases here run on a UTC session, where nothing is moved and no type is consulted; the few
+    that pin a real offset get the instant-bearing type, which is the one the shift exists for. The
+    type contract itself (naive fields, unreadable relations, YAML declarations) is pinned in
+    `test_microbatch_session_clock.py`, and the real `ref()` path in the functional suite.
+    """
+    with mock.patch.object(relation_module, "physical_column_types", lambda relation: dict(types)):
+        yield
+
+
+def _render(start=UTC_DAY_START, end=UTC_DAY_END, field="event_time", column_type="timestamp"):
     relation = MaxComputeRelation.create(identifier="microbatch_model")
-    return relation._render_event_time_filtered(
-        EventTimeFilter(field_name=field, start=start, end=end)
-    )
+    types = {} if column_type is None else {field.replace("`", "").lower(): column_type}
+    with _warehouse_types(types):
+        return relation._render_event_time_filtered(
+            EventTimeFilter(field_name=field, start=start, end=end)
+        )
 
 
 def _dbt_core_text(start=UTC_DAY_START, end=UTC_DAY_END, field="event_time"):
@@ -62,9 +82,12 @@ class TestUtcSessionDropsTheOffset:
         assert _render() == DAY_WINDOW
 
     def test_a_zone_with_a_real_offset_is_decided_by_offset_not_by_name(self, session_clock):
-        """`Etc/GMT+8` is UTC-8 (POSIX sign), and neither reading is UTC."""
+        """`Etc/GMT+8` is UTC-8 (POSIX sign); the name looks like zero, the clock is not."""
         options.local_timezone = "Etc/GMT+8"
-        assert _render() == _dbt_core_text()
+        assert _render() == (
+            "event_time >= '2025-04-30 16:00:00' and event_time < '2025-05-01 16:00:00'"
+        )
+        assert "+00:00" not in _render()
 
     def test_hour_boundary_keeps_its_hour(self, session_clock):
         options.local_timezone = False
@@ -102,13 +125,13 @@ class TestSubsecondBoundaries:
         )
 
 
-class TestSessionsLeftAlone:
-    """Shifting a window onto a non-UTC clock is a separate change; guessing one is not."""
+class TestSessionsThatCannotBeStatedAreLeftAlone:
+    """dbt-core's rendering survives exactly where this cannot name the session clock.
 
-    @pytest.mark.parametrize("name", ["Asia/Shanghai", "Etc/GMT+8", "America/New_York"])
-    def test_other_zone_sessions_keep_dbt_cores_rendering(self, name, session_clock):
-        options.local_timezone = name
-        assert _render() == _dbt_core_text()
+    A resolvable zone that is not UTC is not in this list: it gets that zone's reading of the same
+    instant, which is what ``test_microbatch_session_clock.py`` pins. Guessing a clock is different
+    from stating one.
+    """
 
     def test_an_unreadable_zone_name_is_not_guessed_at(self, session_clock):
         options.local_timezone = "Not/AZone"
@@ -132,14 +155,18 @@ class TestZonesThatOnlyLookUtc:
     `trunc_time()` keeps cutting UTC hours - the silent kind of wrong this file exists to avoid.
     """
 
-    def test_a_summer_boundary_in_a_dst_zone_is_left_as_dbt_core_rendered(self, session_clock):
+    def test_a_summer_boundary_in_a_dst_zone_moves_by_its_summer_offset(self, session_clock):
+        """BST is UTC+1, so the window is stated an hour later - which is what keeps it on its own
+        UTC hour, the grain `trunc_time()` cuts the partitions on."""
         options.local_timezone = "Europe/London"
         july_start = datetime(2025, 7, 1, 0, 0, 0, tzinfo=pytz.UTC)
         july_end = datetime(2025, 7, 2, 0, 0, 0, tzinfo=pytz.UTC)
-        assert _render(start=july_start, end=july_end) == _dbt_core_text(july_start, july_end)
+        assert _render(start=july_start, end=july_end) == (
+            "event_time >= '2025-07-01 01:00:00' and event_time < '2025-07-02 01:00:00'"
+        )
 
     def test_a_winter_boundary_in_the_same_zone_reads_the_utc_wall_clock(self, session_clock):
-        """January in London *is* UTC, so stating the window without the suffix moves nothing."""
+        """January in London *is* UTC: the two readings are the same text, so nothing moves."""
         options.local_timezone = "Europe/London"
         winter_start = datetime(2025, 1, 1, 0, 0, 0, tzinfo=pytz.UTC)
         winter_end = datetime(2025, 1, 2, 0, 0, 0, tzinfo=pytz.UTC)
