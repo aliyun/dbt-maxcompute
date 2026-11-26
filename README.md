@@ -176,6 +176,35 @@ odps.table.append2.enable": "true"
 ```
 You can override these defaults by specifying your own `sql_hints` use model config. Your custom hints will be merged with the defaults — you do not need to repeat the entire list unless you want to change specific values.
 
+### DLF Paimon models on external projects (EP v2)
+
+This preview covers SQL models on DLF Paimon. See the [DLF Paimon preview guide (中文)](docs/epv2-dlf-paimon.zh-CN.md) for installation, scheduling, and retry behavior.
+
+SQL `table` and `view` models require a new relation name on every run. A table
+is populated only after its creation succeeds. The current MaxCompute DLF
+Paimon backend rejects `CREATE VIEW` on EP v2.
+
+SQL `incremental` models can add one new static partition per run. Specify all
+partition keys in `partition_values` and return the partition columns in the
+model query. The adapter writes only the rows for the requested partition.
+
+```sql
+{{ config(
+    materialized='incremental',
+    incremental_strategy='insert_overwrite',
+    partition_by={'fields': ['dt', 'region']},
+    partition_values={'dt': var('run_date'), 'region': var('region')}
+) }}
+select order_id, amount, dt, region from {{ ref('stg_orders') }}
+```
+
+The adapter rejects an existing partition and disables full refresh and
+automatic schema changes on this path. Finish the first write to a new table
+before giving other jobs access to write it. The scheduler must allow at most
+one writer per complete partition key across dbt and other engines, from the
+existence check until the write job reaches a terminal state. Different
+partition keys can run in parallel.
+
 ### Model Hooks
 
 `pre-hook` and `post-hook` statements run as ordinary MaxCompute SQL jobs.

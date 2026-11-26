@@ -29,13 +29,17 @@ from dbt_common.contracts.constraints import ConstraintType
 from dbt_common.exceptions import DbtRuntimeError, MacroArgTypeError
 from odps import ODPS
 from odps.errors import ODPSError, NoSuchObject
+from odps.types import Char, validate_value
+from odps.utils import escape_odps_string
 
 from dbt.adapters.maxcompute import MaxComputeConnectionManager
+from dbt.adapters.maxcompute.catalog_comments import persist_table_comments
 from dbt.adapters.maxcompute.column import (
     CHAR_MAX_SIZE,
     VARCHAR_MAX_SIZE,
     MaxComputeColumn,
 )
+from dbt.adapters.maxcompute.external_catalog import ExternalCatalogMetadata
 from dbt.adapters.maxcompute.relation import MaxComputeRelation
 from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.maxcompute.python_submissions import (
@@ -79,6 +83,7 @@ EXPAND_COLUMN_TYPES_MODES = {
 class MaxComputeConfig(AdapterConfig):
     partitionColumns: Optional[List[Dict[str, str]]] = None
     partitions: Optional[List[str]] = None
+    partition_values: Optional[Dict[str, str | int]] = None
 
     primaryKeys: Optional[List[Dict[str, str]]] = None
     sqlHints: Optional[Dict[str, str]] = None
@@ -121,6 +126,7 @@ class MaxComputeAdapter(SQLAdapter):
     def __init__(self, config, mp_context: SpawnContext) -> None:
         super().__init__(config, mp_context)
         self.connections: MaxComputeConnectionManager = self.connections
+        self._external_catalog = ExternalCatalogMetadata()
 
     @available.parse_none
     def export_semantic_package(
@@ -225,6 +231,74 @@ class MaxComputeAdapter(SQLAdapter):
     def get_odps_client(self) -> ODPS:
         conn = self.acquire_connection()
         return conn.handle.odps
+
+    @available.parse_none
+    def is_external_catalog_project(self, database: str) -> bool:
+        return self._external_catalog.is_bound(self.get_odps_client(), database)
+
+    @available
+    def epv2_partition_values(
+        self, partition_by: Optional[PartitionConfig], partition_values: Any
+    ) -> Dict[str, str]:
+        if partition_by is None or not partition_by.fields or partition_by.auto_partition():
+            raise DbtRuntimeError("EP v2 incremental models require static partition_by columns.")
+        if not isinstance(partition_values, dict) or not all(
+            isinstance(key, str) for key in partition_values
+        ):
+            raise DbtRuntimeError("EP v2 incremental models require a partition_values mapping.")
+        values = {key.lower(): value for key, value in partition_values.items()}
+        fields = partition_by.fields
+        if len(values) != len(partition_values) or sorted(values) != sorted(
+            field.lower() for field in fields
+        ):
+            raise DbtRuntimeError("partition_values must specify every partition_by column once.")
+        if any(type(value) not in (str, int) or value == "" for value in values.values()):
+            raise DbtRuntimeError("partition_values must contain nonempty strings or integers.")
+        return {field.lower(): str(values[field.lower()]) for field in fields}
+
+    @available
+    def epv2_new_partition_write(
+        self, relation: MaxComputeRelation, partition_values: Dict[str, str]
+    ) -> Tuple[List[str], List[str]]:
+        columns = self.get_columns_in_relation(relation)
+        partition_columns = [column for column in columns if column.is_partition]
+        if not partition_columns or [column.name.lower() for column in partition_columns] != list(
+            partition_values
+        ):
+            raise DbtRuntimeError(
+                f"EP v2 partition_by must match the partition columns of {relation} in order."
+            )
+        values = {}
+        fixed_char_fields = set()
+        assignments = []
+        for column in partition_columns:
+            key = column.name.lower()
+            if not (column.is_integer() or column.is_string()):
+                raise DbtRuntimeError(
+                    f"EP v2 does not support static partition column {key} of type {column.data_type}."
+                )
+            data_type = column.table_column.type
+            try:
+                value = str(validate_value(partition_values[key], data_type))
+            except (TypeError, ValueError) as exc:
+                raise DbtRuntimeError(
+                    f"Invalid partition_values entry for {key} of type {column.data_type}."
+                ) from exc
+            if isinstance(data_type, Char):
+                fixed_char_fields.add(key)
+                value = value.rstrip(" ")
+            values[key] = value
+            literal = value if column.is_integer() else f"'{escape_odps_string(value)}'"
+            assignments.append(f"{quote_ref(key)}={literal}")
+        self._external_catalog.require_new_partition(
+            self.get_odps_client(),
+            relation.project,
+            relation.schema or "default",
+            relation.identifier,
+            values,
+            fixed_char_fields,
+        )
+        return [column.name for column in columns if not column.is_partition], assignments
 
     @staticmethod
     def _python_udf_config_values(value: Any, field_name: str) -> Tuple[str, ...]:
@@ -448,7 +522,16 @@ class MaxComputeAdapter(SQLAdapter):
     def get_relation(
         self, database: str, schema: str, identifier: str
     ) -> Optional[MaxComputeRelation]:
-        odpsTable = self.get_odps_client().get_table(identifier, database, schema)
+        client = self.get_odps_client()
+        if self._external_catalog.is_bound(client, database):
+            schema = schema or "default"
+            metadata = self._external_catalog.describe_table(client, database, schema, identifier)
+            if metadata is None:
+                return None
+            return self.Relation.create(
+                database=database, schema=schema, identifier=identifier, type=RelationType.Table
+            )
+        odpsTable = client.get_table(identifier, database, schema)
         try:
             odpsTable.reload()
         except NoSuchObject:
@@ -485,6 +568,12 @@ class MaxComputeAdapter(SQLAdapter):
 
     def get_columns_in_relation(self, relation: MaxComputeRelation):
         logger.debug(f"get_columns_in_relation: {relation.render()}")
+        client = self.get_odps_client()
+        if self._external_catalog.is_bound(client, relation.project):
+            metadata = self._external_catalog.describe_table(
+                client, relation.project, relation.schema or "default", relation.identifier
+            )
+            return self._external_catalog.columns(metadata) if metadata is not None else []
         odps_table = self.get_odps_table_by_relation(relation, 3)
         if not odps_table:
             return []
@@ -680,11 +769,20 @@ class MaxComputeAdapter(SQLAdapter):
         schema_relation: MaxComputeRelation,
     ) -> List[MaxComputeRelation]:
         logger.debug(f"list_relations_without_caching: {schema_relation}")
+        client = self.get_odps_client()
+        database = schema_relation.database
+        schema = schema_relation.schema
+        if self._external_catalog.is_bound(client, database):
+            schema = schema or "default"
+            return [
+                self.Relation.create(
+                    database=database, schema=schema, identifier=name, type=RelationType.Table
+                )
+                for name in self._external_catalog.list_tables(client, database, schema)
+            ]
         try:
             relations = []
-            results = self.get_odps_client().list_tables(
-                project=schema_relation.database, schema=schema_relation.schema
-            )
+            results = client.list_tables(project=database, schema=schema)
             for table in results:
                 for i in range(3):
                     try:
@@ -711,7 +809,11 @@ class MaxComputeAdapter(SQLAdapter):
     def list_schemas(self, database: str) -> List[str]:
         database = database.split(".")[0]
         database = database.strip("`")
-        res = [schema.name for schema in self.get_odps_client().list_schemas(database)]
+        client = self.get_odps_client()
+        if self._external_catalog.is_bound(client, database):
+            res = self._external_catalog.list_schemas(client, database)
+        else:
+            res = [schema.name for schema in client.list_schemas(database)]
 
         logger.debug(f"list_schemas: {res}")
         return res
@@ -719,8 +821,12 @@ class MaxComputeAdapter(SQLAdapter):
     def check_schema_exists(self, database: str, schema: str) -> bool:
         database = database.strip("`")
         schema = schema.strip("`")
-        time.sleep(10)
-        schema_exist = self.get_odps_client().exist_schema(schema, database)
+        client = self.get_odps_client()
+        if self._external_catalog.is_bound(client, database):
+            schema_exist = schema in self._external_catalog.list_schemas(client, database)
+        else:
+            time.sleep(10)
+            schema_exist = client.exist_schema(schema, database)
         logger.debug(f"check_schema_exists: {database}.{schema}, answer is {schema_exist}")
         return schema_exist
 
@@ -731,11 +837,19 @@ class MaxComputeAdapter(SQLAdapter):
         used_schemas: FrozenSet[Tuple[str, str]],
     ) -> "agate.Table":
         relations = []
-        for schema in schemas:
-            results = self.get_odps_client().list_tables(schema=schema)
-            for odps_table in results:
-                relation = MaxComputeRelation.from_odps_table(odps_table)
-                relations.append(relation)
+        client = self.get_odps_client()
+        schema_names = {schema.casefold() for schema in schemas}
+        # MaxCompute groups catalog requests under SYSTEM_CATALOG.INFORMATION_SCHEMA.
+        # The used schemas retain the project for each source and model.
+        for database, schema in used_schemas:
+            if database is None or schema is None or schema.casefold() not in schema_names:
+                continue
+            if self._external_catalog.is_bound(client, database):
+                schema_relation = self.Relation.create(database=database, schema=schema)
+                relations.extend(self.list_relations_without_caching(schema_relation))
+            else:
+                for odps_table in client.list_tables(project=database, schema=schema):
+                    relations.append(MaxComputeRelation.from_odps_table(odps_table))
         return self._get_one_catalog_by_relations(information_schema, relations, used_schemas)
 
     def _get_one_catalog_by_relations(
@@ -761,28 +875,44 @@ class MaxComputeAdapter(SQLAdapter):
         dropped_relations: List[str] = []
 
         for relation in relations:
-            odps_table = self.get_odps_table_by_relation(relation, 10)
             table_database = relation.project
             table_schema = relation.schema
             table_name = relation.table
 
-            if not odps_table:
-                dropped_relations.append(relation.render())
-                continue
-
-            if odps_table.is_virtual_view:
-                table_type = "VIEW"
-            elif odps_table.is_materialized_view:
-                table_type = "MATERIALIZED_VIEW"
-            else:
+            client = self.get_odps_client()
+            if self._external_catalog.is_bound(client, table_database):
+                metadata = self._external_catalog.describe_table(
+                    client, table_database, table_schema or "default", table_name
+                )
+                if metadata is None:
+                    dropped_relations.append(relation.render())
+                    continue
                 table_type = "TABLE"
-            table_comment = odps_table.comment
-            table_owner = odps_table.owner
-            column_index = 1
-            for column in odps_table.table_schema.simple_columns:
-                column_name = column.name
-                column_type = column.type.name
-                column_comment = column.comment
+                table_comment = metadata.get("TableComment")
+                table_owner = metadata.get("Owner")
+                columns = [
+                    (column.name, column.table_column.type.name, column.comment)
+                    for column in self._external_catalog.columns(metadata)
+                    if not column.is_partition
+                ]
+            else:
+                odps_table = self.get_odps_table_by_relation(relation, 10)
+                if not odps_table:
+                    dropped_relations.append(relation.render())
+                    continue
+                if odps_table.is_virtual_view:
+                    table_type = "VIEW"
+                elif odps_table.is_materialized_view:
+                    table_type = "MATERIALIZED_VIEW"
+                else:
+                    table_type = "TABLE"
+                table_comment = odps_table.comment
+                table_owner = odps_table.owner
+                columns = [
+                    (column.name, column.type.name, column.comment)
+                    for column in odps_table.table_schema.simple_columns
+                ]
+            for column_index, (column_name, column_type, column_comment) in enumerate(columns, 1):
                 sql_rows.append(
                     (
                         table_database,
@@ -797,7 +927,6 @@ class MaxComputeAdapter(SQLAdapter):
                         table_owner,
                     )
                 )
-                column_index += 1
 
         if dropped_relations:
             self._report_catalog_dropped_relations(dropped_relations)
@@ -870,6 +999,32 @@ class MaxComputeAdapter(SQLAdapter):
             for column_name, column_type_code, *_ in cursor.description
         ]
         return columns
+
+    @available.parse(lambda *a, **k: [])
+    def get_view_column_definitions_for_docs(
+        self, sql: str, column_dict: Dict[str, Dict[str, Any]]
+    ) -> List[str]:
+        """Probe and render view columns for optional inline documentation."""
+        try:
+            columns = self.get_column_schema_from_query(sql)
+        except (DbtRuntimeError, ODPSError, OSError):
+            logger.debug("Could not inspect view columns. Using post-create comments.")
+            return []
+
+        if len(columns) == 1 and columns[0].name == "_c0" and columns[0].dtype.lower() == "string":
+            # PyODPS uses this placeholder when the result has no column schema.
+            return []
+
+        definitions = []
+        has_comment = False
+        for column in columns:
+            definition = quote_ref(column.name)
+            comment = column_dict.get(column.name, {}).get("description")
+            if comment:
+                definition += f" COMMENT {self.quote_string_literal(comment)}"
+                has_comment = True
+            definitions.append(definition)
+        return definitions if has_comment else []
 
     def timestamp_add_sql(self, add_to: str, number: int = 1, interval: str = "hour") -> str:
         return f"dateadd({add_to}, {number}, '{interval}')"
@@ -1025,7 +1180,10 @@ class MaxComputeAdapter(SQLAdapter):
     @available
     @classmethod
     def mc_render_raw_columns_constraints(
-        cls, raw_columns: Dict[str, Dict[str, Any]], partition_config: Optional[PartitionConfig]
+        cls,
+        raw_columns: Dict[str, Dict[str, Any]],
+        partition_config: Optional[PartitionConfig],
+        persist_column_docs: bool = False,
     ) -> List:
         rendered_column_constraints = []
         partition_column = []
@@ -1042,6 +1200,10 @@ class MaxComputeAdapter(SQLAdapter):
                 c = cls.process_parsed_constraint(constraint, cls.render_column_constraint)
                 if c is not None:
                     rendered_column_constraint.append(c)
+            if persist_column_docs and v.get("description"):
+                rendered_column_constraint.append(
+                    f"COMMENT {cls.quote_string_literal(v['description'])}"
+                )
             rendered_column_constraints.append(" ".join(rendered_column_constraint))
 
         return rendered_column_constraints
@@ -1088,6 +1250,33 @@ class MaxComputeAdapter(SQLAdapter):
         logger.debug(f"Run raw sql: {sql}, instanceId: {inst.id}")
 
     @available
+    @staticmethod
+    def quote_string_literal(value: str) -> str:
+        return "'" + escape_odps_string(value) + "'"
+
+    @available
+    def view_comment_matches(self, relation: MaxComputeRelation, comment: str) -> bool:
+        view = self.get_odps_table_by_relation(relation)
+        # GetTable escapes view-level comments, leaving apostrophes unescaped.
+        return view is not None and view.comment == escape_odps_string(comment).replace(r"\'", "'")
+
+    @available.parse(lambda *a, **k: False)
+    def persist_table_comments_via_catalog(
+        self,
+        relation: MaxComputeRelation,
+        description: Optional[str],
+        column_dict: Dict[str, Dict[str, Any]],
+    ) -> bool:
+        project = relation.database
+        try:
+            if not project or self.is_external_catalog_project(project):
+                return False
+        except (ODPSError, OSError, ValueError):
+            logger.debug("Could not classify the target catalog before comment update. Using SQL.")
+            return False
+        return persist_table_comments(self.get_odps_client(), relation, description, column_dict)
+
+    @available
     def add_comment(self, relation: MaxComputeRelation, comment: str) -> str:
         """
         Add comment to a relation.
@@ -1108,19 +1297,13 @@ class MaxComputeAdapter(SQLAdapter):
     def add_comment_to_column(
         self, relation: MaxComputeRelation, column_name: str, comment: str
     ) -> str:
-        """
-        Add comment to column.
-        """
+        """Add a comment to an existing column."""
         table = self.get_odps_table_by_relation(relation)
         if table is not None:
             for column in table.table_schema.columns:
                 if column.name == column_name and column.comment != comment:
-                    if relation.is_table:
-                        sql = f"ALTER TABLE {relation.database}.{relation.schema}.{relation.identifier} CHANGE COLUMN {quote_ref(column_name)} COMMENT {quote_string(comment)};"
-                        self.run_raw_sql(sql, None)
-                    if relation.is_view:
-                        sql = f"ALTER VIEW {relation.database}.{relation.schema}.{relation.identifier} CHANGE COLUMN {quote_ref(column_name)} COMMENT {quote_string(comment)};"
-                        self.run_raw_sql(sql, None)
+                    if relation.is_table or relation.is_view:
+                        self._change_column_comment(relation, column_name, quote_string(comment))
                     if relation.is_materialized_view:
                         raise DbtRuntimeError("Unsupported set comment to materialized view. ")
                 else:
@@ -1128,6 +1311,32 @@ class MaxComputeAdapter(SQLAdapter):
                         f"The comments for column {column_name} do not need to be modified because the same comments already exist."
                     )
         return ""
+
+    @available
+    def add_comments_to_columns(
+        self, relation: MaxComputeRelation, column_dict: Dict[str, Dict[str, Any]]
+    ) -> None:
+        """Reconcile native table or view comments from one metadata read."""
+        current_comments = {
+            column.name: column.comment for column in self.get_columns_in_relation(relation)
+        }
+        for column_name, docs in column_dict.items():
+            comment = docs.get("description") or ""
+            if (
+                column_name in current_comments
+                and (current_comments[column_name] or "") != comment
+            ):
+                self._change_column_comment(
+                    relation, column_name, self.quote_string_literal(comment)
+                )
+
+    def _change_column_comment(
+        self, relation: MaxComputeRelation, column_name: str, comment_literal: str
+    ) -> None:
+        relation_type = "TABLE" if relation.is_table else "VIEW"
+        relation_name = f"{relation.database}.{relation.schema}.{relation.identifier}"
+        sql = f"ALTER {relation_type} {relation_name} CHANGE COLUMN {quote_ref(column_name)} COMMENT {comment_literal};"
+        self.run_raw_sql(sql, None)
 
     @available
     def get_relations_by_pattern(

@@ -175,52 +175,9 @@ _dbt_maxframe_execute(_dbt_maxframe_sink)
     {%- set sql_hints = config.get('sql_hints', none) -%}
     {%- set sql_header = merge_sql_hints_and_header(sql_hints, config.get('sql_header', none)) -%}
 
-    {%- set is_delta = is_transactional and primary_keys is not none and primary_keys|length > 0 -%}
-
     {% call statement('create_table', auto_begin=False) -%}
-        {{ sql_header if sql_header is not none }}
-        create table {{ relation.render() }} (
-            {% set contract_config = config.get('contract') %}
-            {% if contract_config.enforced and (not temporary) %}
-                {{ get_assert_columns_equivalent(sql) }}
-                {{ get_table_columns_and_constraints_without_brackets(partition_config) }}
-                {%- set sql = get_select_subquery(sql) %}
-            {%- else -%}
-                {{ get_table_columns(sql, primary_keys, partition_config, sql_header) }}
-            {%- endif -%}
-            {% if is_delta -%}
-                ,primary key(
-                {%- for pk in primary_keys -%}
-                    {{ pk }}{{ "," if not loop.last }}
-                {%- endfor -%})
-            {%- endif -%}
-            )
-            {% if partition_config -%}
-                {{ partition_by(partition_config) }}
-            {%- endif -%}
-            {% set extra_props = {} %}
-            {% if tblproperties %}
-                {% do extra_props.update(tblproperties) %}
-            {% endif %}
-            {% if is_transactional %}
-                {% do extra_props.update({"transactional": "true"}) %}
-                {% if is_delta %}
-                    {% do extra_props.update({"write.bucket.num": delta_table_bucket_num}) %}
-                {% endif %}
-            {% endif %}
-            {% if extra_props %}
-                tblproperties(
-                    {% for key, value in extra_props.items() %}
-                        "{{ key }}"="{{ value }}"{{ "," if not loop.last }}
-                    {% endfor %}
-                )
-            {% endif %}
-            {%- if lifecycle %}
-                LIFECYCLE {{ lifecycle }}
-            {%- elif temporary %}
-                LIFECYCLE 1
-            {%- endif %}
-            ;
+        {{ mc_create_table_ddl(relation, sql, partition_config, lifecycle, tblproperties, sql_header,
+                               temporary, is_transactional, primary_keys, delta_table_bucket_num) }}
     {%- endcall -%}
     {{ sql_header if sql_header is not none }}
     insert into {{ relation.render() }}
@@ -234,6 +191,61 @@ _dbt_maxframe_execute(_dbt_maxframe_sink)
     )(
         {{ sql }}
     );
+{%- endmacro %}
+
+
+{% macro mc_create_table_ddl(relation, sql, partition_config, lifecycle, tblproperties, sql_header,
+                             temporary=false, is_transactional=false, primary_keys=none, delta_table_bucket_num=16) -%}
+    {%- set is_delta = is_transactional and primary_keys is not none and primary_keys|length > 0 -%}
+
+    {{ sql_header if sql_header is not none }}
+    create table {{ relation.render() }} (
+        {% set contract_config = config.get('contract') %}
+        {% if contract_config.enforced and (not temporary) %}
+            {{ get_assert_columns_equivalent(sql) }}
+            {% if get_table_columns_and_constraints_without_brackets.macro is defined
+                  and get_table_columns_and_constraints_without_brackets.macro.package_name == 'dbt_maxcompute'
+                  and maxcompute__should_inline_column_docs('table', relation.database) %}
+                {{ get_table_columns_and_constraints_without_brackets(partition_config, persist_column_docs=true) }}
+            {% else %}
+                {{ get_table_columns_and_constraints_without_brackets(partition_config) }}
+            {% endif %}
+        {%- else -%}
+            {{ get_table_columns(sql, primary_keys, partition_config, sql_header) }}
+        {%- endif -%}
+        {% if is_delta -%}
+            ,primary key(
+            {%- for pk in primary_keys -%}
+                {{ pk }}{{ "," if not loop.last }}
+            {%- endfor -%})
+        {%- endif -%}
+        )
+        {% if partition_config -%}
+            {{ partition_by(partition_config) }}
+        {%- endif -%}
+        {% set extra_props = {} %}
+        {% if tblproperties %}
+            {% do extra_props.update(tblproperties) %}
+        {% endif %}
+        {% if is_transactional %}
+            {% do extra_props.update({"transactional": "true"}) %}
+            {% if is_delta %}
+                {% do extra_props.update({"write.bucket.num": delta_table_bucket_num}) %}
+            {% endif %}
+        {% endif %}
+        {% if extra_props %}
+            tblproperties(
+                {% for key, value in extra_props.items() %}
+                    "{{ key }}"="{{ value }}"{{ "," if not loop.last }}
+                {% endfor %}
+            )
+        {% endif %}
+        {%- if lifecycle %}
+            LIFECYCLE {{ lifecycle }}
+        {%- elif temporary %}
+            LIFECYCLE 1
+        {%- endif %}
+        ;
 {%- endmacro %}
 
 
@@ -268,9 +280,13 @@ _dbt_maxframe_execute(_dbt_maxframe_sink)
 {% endmacro %}
 
 -- Compared to get_table_columns_and_constraints, only the surrounding brackets are deleted
-{% macro get_table_columns_and_constraints_without_brackets(partition_config=None) -%}
+{% macro get_table_columns_and_constraints_without_brackets(partition_config=None, persist_column_docs=false) -%}
     {# loop through user_provided_columns to create DDL with data types and constraints #}
-    {%- set raw_column_constraints = adapter.mc_render_raw_columns_constraints(raw_columns=model['columns'], partition_config=partition_config) -%}
+    {%- set raw_column_constraints = adapter.mc_render_raw_columns_constraints(
+        raw_columns=model['columns'],
+        partition_config=partition_config,
+        persist_column_docs=persist_column_docs
+    ) -%}
     {%- set raw_model_constraints = adapter.render_raw_model_constraints(raw_constraints=model['constraints']) -%}
     {% for c in raw_column_constraints -%}
       {{ c }}{{ "," if not loop.last or raw_model_constraints }}

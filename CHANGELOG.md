@@ -12,6 +12,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.2b2] — 2026-11-25 (preview)
+
+### Changed
+
+- Write column comments in the creation DDL for eligible native views and SQL
+  tables with enforced contracts when column documentation is enabled.
+- Update table and regular-column comments together through CatalogAPI for
+  supported native tables. Discover the CatalogAPI endpoint through PyODPS
+  and check metadata after an ambiguous write response.
+- Continue the DLF Paimon EP v2 preview for SQL source reads, new table
+  creation, and incremental writes to new static partitions.
+
+## [1.12.2b1] — 2026-11-23 (preview)
+
+### Added
+
+- Read EP v2 external catalog metadata through SQL so dbt can resolve DLF
+  Paimon sources and relations.
+- Preview SQL `table` creation and `incremental` writes to a single new static
+  partition on DLF Paimon. Finish initializing a table before other writers
+  use it and schedule one writer per complete partition key. The service
+  currently rejects `CREATE VIEW` on EP v2.
+  [DLF Paimon preview guide (中文)](docs/epv2-dlf-paimon.zh-CN.md)
+
 ## [1.12.1] — 2026-11-05
 
 ### Fixed
