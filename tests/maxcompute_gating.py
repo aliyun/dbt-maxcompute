@@ -12,9 +12,14 @@ confusing test failures:
 * ``dbt-maxcompute`` requires a three-tier (schema-enabled) project.  On a
   two-tier project dbt fails during schema discovery with
   ``ODPS-0110061 ... Invalid database operations on two-tier model``.
-* ``auth_type: chain`` resolves credentials from the environment (or another
-  credential provider).  An empty chain is a missing credential, not a product
-  failure.
+* ``auth_type: chain`` may resolve from the environment, a credentials file, an
+  assumed role or instance metadata, so it is only judged when the probe runs -
+  and it is then reported as a credential problem, not as an unreachable project.
+
+A blocked preflight has to read as one sentence.  The credential chain logs a
+full traceback per failed provider (measured: 3060 lines / 275 KB for one
+credential-less probe on 2026-10-15), so its logger is quieted for the duration
+of the probe and the verdict is capped to a single line.
 
 Nothing here prints credential material: profiles are read but never echoed,
 and ``summary()`` reports the endpoint host only.
@@ -30,8 +35,10 @@ Command line (used by the runner script)::
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -199,6 +206,65 @@ def leftover_schemas(created: Optional[List[str]] = None) -> List[str]:
     return sorted(set(created) & still_there)
 
 
+#: Markers that mean "the credential chain produced nothing usable", as opposed
+#: to "the project cannot be reached".  Reporting the first as the second sends
+#: people to the network instead of to their environment.
+CREDENTIAL_FAILURE_MARKERS = (
+    "credential",
+    "accesskeyid",
+    "access_key",
+    "signature",
+    "security_token",
+    "sts token",
+    "ram role",
+    "get_credential",
+)
+
+
+#: A run whose interpreter cannot import the adapter is a broken environment,
+#: and saying "the project is not reachable" sends people to the network.
+DEPENDENCY_FAILURE_MARKERS = (
+    "no module named",
+    "modulenotfounderror",
+    "importerror",
+    "dbt-core",
+    # "command not found" only - the server says "Table/Project not found" too
+    "command not found",
+)
+
+
+def is_dependency_failure(message: str) -> bool:
+    lowered = (message or "").lower()
+    return any(marker in lowered for marker in DEPENDENCY_FAILURE_MARKERS)
+
+
+def is_credential_failure(message: str) -> bool:
+    lowered = (message or "").lower()
+    return any(marker in lowered for marker in CREDENTIAL_FAILURE_MARKERS)
+
+
+def brief_exception_message(exc: BaseException) -> str:
+    """One bounded line for an operator, whatever the library raised through."""
+    text = " ".join(str(exc).split()) or type(exc).__name__
+    return text if len(text) <= 240 else "… " + text[-239:]
+
+
+@contextmanager
+def quiet_credential_logging():
+    """Silence ``alibabacloud_credentials`` for the probe, then restore the level.
+
+    The failure itself is still reported - as the single sentence the caller
+    builds from :func:`brief_exception_message`.
+    """
+    logger = logging.getLogger("alibabacloud_credentials")
+    previous = logger.level
+    logger.setLevel(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        logger.setLevel(previous)
+
+
 @lru_cache(maxsize=1)
 def preflight_reason() -> Optional[str]:
     """:func:`blocked_reason` plus a one-time network probe of the project.
@@ -212,10 +278,23 @@ def preflight_reason() -> Optional[str]:
     profile = load_profile()
     project = profile["project"]
     try:
-        client = odps_client(profile)
-        next(iter(client.list_schemas(project)), None)
+        with quiet_credential_logging():
+            client = odps_client(profile)
+            next(iter(client.list_schemas(project)), None)
     except Exception as exc:
-        message = " ".join(str(exc).split())[:300]
+        message = brief_exception_message(exc)
+        if is_dependency_failure(message):
+            return (
+                f"the test environment cannot run before contacting {project}: {message} - "
+                "install the adapter and its requirements (pip install -r dev-requirements.txt "
+                "&& pip install -e .) or point PYTHON at that interpreter"
+            )
+        if is_credential_failure(message):
+            return (
+                f"auth_type={auth_type(profile)} did not resolve a credential before the project "
+                "was contacted: export an access key pair, or point the profile at a credentials "
+                f"file/URI (dynamic providers are attempted during this probe): {message}"
+            )
         if "two-tier" in message or "ODPS-0110061" in message:
             return (
                 f"project {project} is not a three-tier (schema-enabled) project, "

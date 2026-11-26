@@ -64,10 +64,18 @@ The script resolves a profile in this order:
    ./scripts/run-integration-tests.sh
    ```
 
-`dbt-core` 1.11 stopped rendering Jinja inside `profiles.yml`, so
-`env_var(...)` in a profile file does not work; generating the profile from the
-environment as shown above is the supported way to keep credentials out of
-committed files.
+Why the profile is generated instead of committed has nothing to do with Jinja.
+`env_var(...)` inside a profile file **does** render on dbt-core 1.11.2, measured
+on 2026-10-03 with two discriminators: an undefined variable makes `dbt parse`
+fail with `Env var required but not provided`, and a defined one comes back
+resolved in `dbt debug` output. An earlier revision of this page claimed dbt-core
+1.11 had stopped rendering Jinja in `profiles.yml`; that claim was wrong and is
+retracted here. (`1.12.5` was not tested, so nothing is asserted about it.)
+
+Generating the profile at runtime is still the supported route, for reasons that
+survive the correction: access keys never enter any file that could be committed,
+and each run gets its own schema, so concurrent runs against a shared project do
+not collide.
 
 ### Reading the result
 
@@ -84,11 +92,13 @@ Exit codes:
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Cases ran against the project and all passed |
+| 0 | Cases ran against the project, all passed, and the schemas this run created were verified gone |
 | 1 | Cases ran and at least one failed, or test schemas were left behind |
-| 2 | **Blocked** - no credentials, a two-tier project, or the project was unreachable. Nothing reached a server, so this is never reported as a pass |
+| 2 | **No verdict** - and deliberately not two different kinds of "fine": either nothing reached a server (no credentials, a two-tier project, the project unreachable), or cases ran but the residue check could not be read. Never reported as a pass |
 
-Cases skipped because credentials are missing also make the script exit `2`.
+Cases skipped because credentials are missing also make the script exit `2`, and so
+does a run whose cleanup could not be checked - see the exit-status block in
+`scripts/run-integration-tests.sh --help`.
 
 ### Unrelated breakage is reported, not absorbed
 
@@ -120,25 +130,46 @@ asked for them. Checking "did any `test*` schema
 appear while I was running" was the first version, and it is wrong on a shared
 project: measured on 2026-09-26, an unrelated `test*` schema created mid-run
 made a fully passing suite report `6 passed, 1 error` and exit `1`. If no names
-were recorded the script says `cleanup: UNKNOWN` instead of inventing a verdict.
+were recorded, or the project's schema list cannot be read, the script says
+`cleanup: UNKNOWN` and ends the run `NO-VERDICT` with exit `2` instead of
+inventing a verdict or rounding it up to `PASSED`. The promise this entry exists
+for is that nothing reads green that was not checked, and an unverified cleanup is
+exactly that case; before this change it exited `0`.
 Running `pytest` directly is fine too: every case that needs a server is
 skipped with the reason computed by `tests/maxcompute_gating.py`.
 
 ## Verified baselines
 
-The entry has been run against a live project on two dependency resolutions,
-because they are not the same thing:
+Every row names the commit and date it was measured on, because the suite grows
+and a bare count goes stale:
 
-| baseline | what it is | result |
-| --- | --- | --- |
-| Python 3.12.3, dbt-core 1.11.2, pyodps 0.13.2, pytest 9.1.1 | the compatibility line README declares, adapter installed from this source tree | minimal set 6/6 (389 s); `--suite core` 20/20 (1180 s) |
-| Python 3.10.21, dbt-core 1.12.5, dbt-common 1.39.0, dbt-adapters 1.24.5, dbt-tests-adapter 1.20.0, pytest 9.1.1 | what `pip install -r dev-requirements.txt && pip install -e .` resolves to today, which is what this workflow job installs | minimal set 6/6 (379 s), 136 unit tests pass, all 246 functional tests still collect |
+| baseline | what it is | measured on | result |
+| --- | --- | --- | --- |
+| Python 3.12.3, dbt-core 1.11.2, pyodps 0.13.2, pytest 9.1.1 | the compatibility line README declares, adapter installed from this source tree | `94efbbc`, 2026-09-26 | minimal set 6/6 (389 s); `--suite core` 20/20 (1180 s) |
+| Python 3.10.21, dbt-core 1.12.5, dbt-common 1.39.0, dbt-adapters 1.24.5, dbt-tests-adapter 1.20.0, pytest 9.1.1, alibabacloud-credentials 1.0.12 | what `pip install -r dev-requirements.txt && pip install -e .` resolves to, i.e. what this workflow job installs | `94efbbc`, 2026-09-26 | minimal set 6/6 (379 s); 136 unit tests; 246 functional tests collected |
+| the same CI resolution, on the current line | the entry re-checked against a moved master, after its own merge | `ffda401`, 2026-10-15 | 223 unit tests pass; 314 functional tests collect and `-m integration_smoke` still selects exactly 6; live minimal set **6/6 in 1031.95 s** with `cleanup: ok (6 schemas created by this run, all dropped)` |
+| Python 3.12.3, dbt-core 1.11.2, pyodps 0.13.2, pytest 9.1.1 | matrix leg 1 as the workflows pin it today, re-checked against a master that moved 15 commits since this PR's base | `cc0ab25`, 2026-10-28 | `-m integration_smoke` now selects 16 of 325 functional tests (test_core_112.py 5, test_minimal_sql_set.py 6, test_truncate_insert.py 5); live: `executed=11 passed=11 failed=0 errors=0 skipped=6` in 700.91 s (0:11:40), cleanup: ok (7 schemas created by this run, all dropped), status:  PASSED (server-side evidence produced) |
+
+Same six cases, 17 minutes on 2026-10-15 against 6.5 minutes on 2026-09-26: this
+project was queueing heavy statements at 80-140 s each in the evening while
+`select 1` still returned in 2.5 s. One of those cases is slow by design and worth
+knowing about before you put this behind a merge gate: the deliberate-error model
+spent **152.03 s** failing, because the adapter retries the semantic
+`ODPS-0130131` (table not found) ten times at 15 s intervals
+(`dbt/adapters/maxcompute/wrapper.py`) - nine retries are visible in the log of
+that run. The entry reported it as an error, which is the point; the delay is the
+adapter's, and it is tracked separately.
 
 Note the asymmetry rather than reading past it: `setup.py` bounds `dbt-core` as
-`>=1.11.2` with no upper bound, so a CI install lands on 1.12.5 while README
-declares "the dbt Core 1.11 compatibility line". Both suites passed on both
-resolutions here, but the declared window is a compatibility statement about the
-adapter, not about this test entry, and this change does not alter it.
+`>=1.11.2` with no upper bound, so a plain `pip install -e .` outside the workflows
+still floats to whatever Core is newest. Inside the workflows the version is now
+pinned - `integration.yml` and `main.yml` both name '1.11.2','1.11.16','1.12.6' - which is
+why every row above states the leg it was measured on. The skips in the last row
+are capability gates, not failures: `requires dbt Core 1.12` and
+`requires dbt-maxcompute[maxframe]`; the Core-1.12 cases are expected to execute on that leg, which
+was not measured here. Both suites passed on every resolution tried locally, but
+the declared window is a compatibility statement about the adapter, not about this
+test entry, and this change does not alter it.
 
 ## Run it in CI
 
