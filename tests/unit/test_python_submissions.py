@@ -737,3 +737,79 @@ def model(dbt, session):
     )
 
     assert parse_result.success, parse_result.exception
+
+
+@pytest.mark.parametrize("error", ["KeyboardInterrupt", "RuntimeError"])
+def test_failed_model_stops_session_before_dropping_output(error):
+    events = []
+    session = FakeSession()
+    session.destroy = lambda: events.append("destroy")
+    credentials = make_credentials()
+    credentials.odps.return_value.delete_table.side_effect = (
+        lambda *args, **kwargs: events.append("drop")
+    )
+    helper = MaxFramePythonJobHelper(make_parsed_model(maxframe_retries=0), credentials)
+    compiled_code = (
+        "_dbt_maxframe_target_relation = 'analytics.intermediate'\n"
+        f"raise {error}('interrupted')"
+    )
+    expected_error = KeyboardInterrupt if error == "KeyboardInterrupt" else DbtRuntimeError
+    with patch(
+        "dbt.adapters.maxcompute.python_submissions._load_maxframe_runtime",
+        return_value=(FakeMaxFrame(session), lambda options: capturing_option_context({}, options)),
+    ), pytest.raises(expected_error):
+        helper.submit(compiled_code)
+    assert events == ["destroy", "drop"]
+
+
+@pytest.mark.parametrize("error", ["KeyboardInterrupt", "RuntimeError"])
+def test_destroy_failure_preserves_tables_and_original_error(error):
+    session = FakeSession()
+    session.destroy = MagicMock(side_effect=RuntimeError("destroy unavailable"))
+    credentials = make_credentials()
+    helper = MaxFramePythonJobHelper(make_parsed_model(maxframe_retries=0), credentials)
+    compiled_code = (
+        "_dbt_maxframe_target_relation = 'analytics.intermediate'\n"
+        f"raise {error}('original model failure')"
+    )
+    expected_error = KeyboardInterrupt if error == "KeyboardInterrupt" else DbtRuntimeError
+    with patch(
+        "dbt.adapters.maxcompute.python_submissions._load_maxframe_runtime",
+        return_value=(FakeMaxFrame(session), lambda options: capturing_option_context({}, options)),
+    ), pytest.raises(expected_error, match="original model failure"):
+        helper.submit(compiled_code)
+    session.destroy.assert_called_once()
+    credentials.odps.return_value.delete_table.assert_not_called()
+    credentials.odps.return_value.list_tables.assert_not_called()
+
+
+def test_retry_does_not_restart_model_while_prior_session_may_live():
+    session = FakeSession()
+    session.destroy = MagicMock(side_effect=RuntimeError("destroy unavailable"))
+    maxframe = SequencedMaxFrame(session, FakeSession("must-not-start"))
+    credentials = make_credentials()
+    helper = MaxFramePythonJobHelper(make_parsed_model(maxframe_retries=1), credentials)
+    with patch(
+        "dbt.adapters.maxcompute.python_submissions._load_maxframe_runtime",
+        return_value=(maxframe, lambda options: capturing_option_context({}, options)),
+    ), pytest.raises(DbtRuntimeError, match="original transport reset"):
+        helper.submit(
+            "_dbt_maxframe_target_relation = 'analytics.intermediate'\n"
+            "raise ConnectionResetError('original transport reset')"
+        )
+    assert len(maxframe.new_session_kwargs) == 1
+    credentials.odps.return_value.delete_table.assert_not_called()
+
+
+def test_successful_output_is_retained_when_session_destroy_fails():
+    session = FakeSession()
+    session.destroy = MagicMock(side_effect=RuntimeError("destroy unavailable"))
+    credentials = make_credentials()
+    helper = MaxFramePythonJobHelper(make_parsed_model(), credentials)
+    with patch(
+        "dbt.adapters.maxcompute.python_submissions._load_maxframe_runtime",
+        return_value=(FakeMaxFrame(session), lambda options: capturing_option_context({}, options)),
+    ):
+        result = helper.submit("_dbt_maxframe_target_relation = 'analytics.final_output'")
+    assert result.run_id == session.session_id
+    credentials.odps.return_value.delete_table.assert_not_called()
